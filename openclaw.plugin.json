@@ -1,0 +1,90 @@
+{
+  "id": "crypto-trader",
+  "name": "Crypto Trader",
+  "description": "AI-powered cryptocurrency trading with Binance integration, real-time monitoring, and Claude-driven decision making",
+  "version": "1.0.0",
+  "author": "User",
+  "license": "MIT",
+  "repository": "",
+  "skills": ["skills/crypto-trader"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "binanceApiKey": {
+        "type": "string",
+        "description": "Binance API Key"
+      },
+      "binanceApiSecret": {
+        "type": "string",
+        "description": "Binance API Secret"
+      },
+      "binanceTestnet": {
+        "type": "boolean",
+        "description": "Use Binance Testnet",
+        "default": true
+      },
+      "anthropicApiKey": {
+        "type": "string",
+        "description": "Anthropic Claude API Key (optional, for AI decisions)"
+      },
+      "maxPositionSize": {
+        "type": "number",
+        "description": "Maximum position size in USD",
+        "default": 1000
+      },
+      "maxDailyLoss": {
+        "type": "number",
+        "description": "Maximum daily loss in USD",
+        "default": 500
+      },
+      "maxOpenPositions": {
+        "type": "number",
+        "description": "Maximum concurrent open positions",
+        "default": 5
+      },
+      "defaultStopLossPct": {
+        "type": "number",
+        "description": "Default stop loss percentage",
+        "default": -5
+      },
+      "defaultTakeProfitPct": {
+        "type": "number",
+        "description": "Default take profit percentage",
+        "default": 15
+      },
+      "monitorSymbols": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Symbols to monitor (e.g., ['BTC/USDT', 'ETH/USDT'])",
+        "default": ["BTC/USDT", "ETH/USDT"]
+      },
+      "checkInterval": {
+        "type": "number",
+        "description": "Price check interval in seconds",
+        "default": 300
+      },
+      "enableAiDecisions": {
+        "type": "boolean",
+        "description": "Enable Claude AI for trading decisions",
+        "default": true
+      }
+    },
+    "required": ["binanceApiKey", "binanceApiSecret"]
+  },
+  "uiHints": {
+    "binanceApiKey": {
+      "label": "Binance API Key",
+      "placeholder": "Enter your Binance API key"
+    },
+    "binanceApiSecret": {
+      "label": "Binance API Secret",
+      "placeholder": "Enter your Binance API secret",
+      "sensitive": true
+    },
+    "anthropicApiKey": {
+      "label": "Claude API Key (Optional)",
+      "placeholder": "Enter your Anthropic API key for AI decisions",
+      "sensitive": true
+    }
+  }
+}
