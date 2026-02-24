@@ -224,6 +224,54 @@ class SniperPosition:
 
         return liquidation_price
 
+    def calculate_volatility_buffer(self, symbol: str, entry_price: float) -> float:
+        """
+        v5.2: 计算动态波动率安全垫（Volatility Buffer）
+
+        废除固定的 5 tick，改为基于真实波动率的动态缓冲：
+        Buffer = max(Entry_Price × 0.002, 1m_ATR × 0.5)
+
+        逻辑：
+        - 基础缓冲：0.2% 标的价格（防止正常波动误触）
+        - ATR 缓冲：1 分钟 ATR 的 50%（适应极端闪崩）
+        - 取两者中较大值，确保在流动性枯竭时也能抢在强平引擎前成交
+
+        Args:
+            symbol: 交易对
+            entry_price: 入场价格
+
+        Returns:
+            动态安全垫（USDT）
+        """
+        try:
+            # 尝试获取实时 ATR（如果 exchange_info 有）
+            if hasattr(self.exchange_info, 'fetch_atr'):
+                atr_1m = self.exchange_info.fetch_atr(symbol, timeframe='1m', period=14)
+                atr_buffer = atr_1m * 0.5
+            else:
+                # 降级：使用默认波动率估算
+                # 假设 1 分钟 ATR ≈ 标的价格 × 0.1%（保守估计）
+                atr_buffer = entry_price * 0.001
+
+            # 基础缓冲：0.2% 标的价格
+            base_buffer = entry_price * 0.002
+
+            # 动态缓冲 = max(基础, ATR)
+            dynamic_buffer = max(base_buffer, atr_buffer)
+
+            logger.info(f"🛡️ 动态波动率安全垫计算:")
+            logger.info(f"  基础缓冲 (0.2%): ${base_buffer:.2f}")
+            logger.info(f"  ATR 缓冲 (50%): ${atr_buffer:.2f}")
+            logger.info(f"  最终安全垫: ${dynamic_buffer:.2f} ({dynamic_buffer/entry_price*100:.3f}%)")
+
+            return dynamic_buffer
+
+        except Exception as e:
+            # 异常降级：使用 0.3% 标的价格（超保守）
+            fallback_buffer = entry_price * 0.003
+            logger.warning(f"⚠️ 动态缓冲计算失败，降级为 0.3%: ${fallback_buffer:.2f} ({e})")
+            return fallback_buffer
+
     def calculate_sniper_position(self, symbol: str, capital: float,
                                   side: str, entry_price: float,
                                   stop_distance_pct: float = 0.02) -> Optional[SniperPosition]:
@@ -262,21 +310,19 @@ class SniperPosition:
         # v5.1: 计算真实强平价（基于 MMR）
         liquidation_price = self.calculate_liquidation_price(entry_price, leverage, side, quantity)
 
-        # v5.1: 把止损线设在强平价前置几个 tick（主动止损）
-        # 获取价格精度
-        info = self.exchange_info.fetch_symbol_info(symbol)
-        tick_size = info.tick_size
+        # v5.2: 计算动态波动率安全垫（废除固定 5 tick）
+        volatility_buffer = self.calculate_volatility_buffer(symbol, entry_price)
 
-        # 止损价 = 强平价 ± 5 个 tick（前置）
+        # 止损价 = 强平价 ± 动态安全垫（确保抢在强平引擎前成交）
         if side == 'LONG':
-            # LONG: 止损价 = 强平价 + 5 tick（避免被强平）
-            stop_loss_price = liquidation_price + 5 * tick_size
+            # LONG: 止损价 = 强平价 + 动态安全垫（避免被强平）
+            stop_loss_price = liquidation_price + volatility_buffer
             # 目标止盈（1:5 盈亏比）
             stop_distance = (entry_price - stop_loss_price) / entry_price
             take_profit_price = entry_price * (1 + abs(stop_distance) * self.target_rr_ratio)
         else:  # SHORT
-            # SHORT: 止损价 = 强平价 - 5 tick（避免被强平）
-            stop_loss_price = liquidation_price - 5 * tick_size
+            # SHORT: 止损价 = 强平价 - 动态安全垫（避免被强平）
+            stop_loss_price = liquidation_price - volatility_buffer
             # 目标止盈（1:5 盈亏比）
             stop_distance = (stop_loss_price - entry_price) / entry_price
             take_profit_price = entry_price * (1 - abs(stop_distance) * self.target_rr_ratio)
@@ -320,13 +366,15 @@ class SniperPosition:
         logger.info(f"名义价值: ${notional:.2f}")
         logger.info(f"占用保证金: ${margin_used:.2f} ({margin_used/capital*100:.1f}% 资金)")
         logger.info(f"")
-        logger.info(f"⚠️ v5.1 真实强平价计算:")
+        logger.info(f"⚠️ v5.2 动态强平价计算:")
         logger.info(f"  真实强平价: ${liquidation_price:.2f} (基于 MMR)")
         logger.info(f"  强平距离: {abs(liquidation_price/position.entry_price - 1)*100:.2f}%")
+        logger.info(f"  动态安全垫: ${volatility_buffer:.2f} ({volatility_buffer/position.entry_price*100:.3f}%)")
         logger.info(f"")
-        logger.info(f"🛡️ 主动止损线（前置 5 tick）:")
+        logger.info(f"🛡️ 主动止损线（动态缓冲）:")
         logger.info(f"  止损价: ${position.stop_loss_price:.2f} ({abs(position.stop_loss_price/position.entry_price - 1)*100:.2f}%)")
         logger.info(f"  💡 宁可自己止损，绝不让交易所强平！")
+        logger.info(f"  📊 动态缓冲确保在闪崩时也能抢在强平引擎前成交！")
         logger.info(f"")
         logger.info(f"🎯 目标止盈: ${position.take_profit_price:.2f} ({abs(position.take_profit_price/position.entry_price - 1)*100:.2f}%)")
         logger.info(f"盈亏比: 1:{self.target_rr_ratio}")

@@ -40,13 +40,15 @@ logger = logging.getLogger(__name__)
 
 class SniperTrader:
     """
-    v5.0 狙击手交易器
+    v5.2 狙击手交易器（终极防弹版）
 
     核心理念：
     - 极低频（一周 1-2 次）
     - 极高置信度（三重共振）
     - 高杠杆孤注一掷（50% 资金）
     - 1:5 盈亏比（移动止盈）
+    - 动态波动率安全垫（废除 5 tick）
+    - 订单生命周期 + 动量代偿（防止踏空）
     """
 
     def __init__(self, testnet: bool = True):
@@ -60,7 +62,7 @@ class SniperTrader:
         self.capital = 200  # USDT（超小资金）
 
         # 初始化组件
-        logger.info("初始化 v5.0 狙击手交易器...")
+        logger.info("初始化 v5.2 狙击手交易器...")
         self.exchange_info = BinanceExchangeInfo(testnet=testnet)
         self.position_manager = SniperPositionManager(self.exchange_info)
         self.mtf_lock = MTFResonanceLock()
@@ -71,20 +73,26 @@ class SniperTrader:
         # 运行状态
         self.running = True
 
-        logger.info(f"✅ 狙击手交易器已初始化")
+        # v5.2: 挂单追踪（订单生命周期管理）
+        self.pending_orders = {}  # {symbol: {'signal': MTFSignal, 'timestamp': datetime, 'side': str}}
+
+        logger.info(f"✅ v5.2 狙击手交易器已初始化")
         logger.info(f"  测试网: {'是' if testnet else '否（主网！）'}")
         logger.info(f"  资金: ${self.capital} USDT")
         logger.info(f"  监控交易对: {', '.join(self.watch_symbols)}")
+        logger.info(f"  订单 TTL: 1 小时（4 根 15m K线）")
+        logger.info(f"  动量代偿: 5 分钟内创新高/低 → 市价追入")
 
     async def check_and_trade(self, symbol: str) -> Optional[str]:
         """
-        检查并执行交易
+        v5.2: 检查并执行交易（增加订单生命周期 + 动量代偿）
 
         流程：
         1. MTF 三重共振检查
-        2. 如果锁定，计算仓位
-        3. 检查是否允许开仓
-        4. 执行开仓
+        2. 如果锁定，检查是否等待回踩
+        3. 如果需要回踩，挂单等待（TTL 1 小时）
+        4. 监控动量：5 分钟内创新高/低 → 市价追入
+        5. 执行开仓
 
         Args:
             symbol: 交易对
@@ -109,27 +117,161 @@ class SniperTrader:
         ticker = self.exchange_info.exchange.fetch_ticker(symbol)
         current_price = ticker['last']
 
-        # 5. 计算狙击手仓位
+        # 5. v5.2: 判断是否需要等待回踩
+        if signal.wait_for_pullback and signal.suggested_entry_price:
+            # 挂单等待回踩
+            self.pending_orders[symbol] = {
+                'signal': signal,
+                'timestamp': datetime.now(),
+                'side': 'LONG' if signal.signal == 1 else 'SHORT',
+                'vwap': signal.suggested_entry_price,
+                'breakthrough_price': signal.breakthrough_price,
+            }
+
+            logger.info(f"📝 {symbol} 挂单等待回踩 VWAP ${signal.suggested_entry_price:.2f}")
+            logger.info(f"  突破价格: ${signal.breakthrough_price:.2f}")
+            logger.info(f"  当前价格: ${current_price:.2f}")
+            logger.info(f"  TTL: 1 小时（超时自动撤销）")
+            logger.info(f"  动量代偿: 5 分钟内创新高/低 → 市价追入")
+
+            return f"📝 挂单等待 {symbol} 回踩 VWAP ${signal.suggested_entry_price:.2f}"
+
+        # 6. 不需要回踩，直接市价开仓
         side = 'LONG' if signal.signal == 1 else 'SHORT'
         position = self.position_manager.calculate_sniper_position(
             symbol=symbol,
             capital=self.capital,
             side=side,
             entry_price=current_price,
-            stop_distance_pct=0.02  # 2% 爆仓距离
+            stop_distance_pct=0.02
         )
 
         if not position:
             logger.error(f"❌ 仓位计算失败: {symbol}")
             return None
 
-        # 6. 开仓
+        # 7. 开仓
         self.position_manager.open_position(position)
 
         message = f"🎯 已开仓 {symbol} {side} @ ${current_price:.2f}"
         logger.critical(message)
 
         return message
+
+    async def check_pending_orders(self):
+        """
+        v5.2: 检查挂单状态（生命周期 + 动量代偿）
+
+        逻辑：
+        1. 检查挂单 TTL（超时 1 小时 → 撤销）
+        2. 检查动量代偿（5 分钟内创新高/低 → 市价追入）
+        3. 检查价格回踩（价格触及 VWAP → 限价成交）
+        """
+        if not self.pending_orders:
+            return
+
+        for symbol, order in list(self.pending_orders.items()):
+            signal = order['signal']
+            order_time = order['timestamp']
+            vwap = order['vwap']
+            breakthrough_price = order['breakthrough_price']
+            side = order['side']
+
+            # 获取当前价格
+            try:
+                ticker = self.exchange_info.exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+            except Exception as e:
+                logger.error(f"获取 {symbol} 价格失败: {e}")
+                continue
+
+            # 1. 检查 TTL（超时 1 小时）
+            holding_duration = datetime.now() - order_time
+            holding_minutes = holding_duration.total_seconds() / 60
+
+            if holding_minutes > 60:
+                # 超时撤销
+                del self.pending_orders[symbol]
+                logger.warning(f"⏰ {symbol} 挂单超时 1 小时，已撤销")
+                continue
+
+            # 2. 检查动量代偿（5 分钟内创新高/低）
+            if holding_minutes <= 5:
+                # 检查是否创新高/低
+                if side == 'LONG' and current_price > breakthrough_price:
+                    # 做多创新高 → 市价追入
+                    logger.critical(f"🚀 {symbol} 动量代偿触发！价格 ${current_price:.2f} > 突破价 ${breakthrough_price:.2f} → 市价追入！")
+
+                    # 计算仓位
+                    position = self.position_manager.calculate_sniper_position(
+                        symbol=symbol,
+                        capital=self.capital,
+                        side=side,
+                        entry_price=current_price,
+                        stop_distance_pct=0.02
+                    )
+
+                    if position:
+                        self.position_manager.open_position(position)
+                        del self.pending_orders[symbol]
+                        logger.critical(f"🎯 动量追入成功 {symbol} {side} @ ${current_price:.2f}")
+                        continue
+
+                elif side == 'SHORT' and current_price < breakthrough_price:
+                    # 做空创新低 → 市价追入
+                    logger.critical(f"🚀 {symbol} 动量代偿触发！价格 ${current_price:.2f} < 突破价 ${breakthrough_price:.2f} → 市价追入！")
+
+                    # 计算仓位
+                    position = self.position_manager.calculate_sniper_position(
+                        symbol=symbol,
+                        capital=self.capital,
+                        side=side,
+                        entry_price=current_price,
+                        stop_distance_pct=0.02
+                    )
+
+                    if position:
+                        self.position_manager.open_position(position)
+                        del self.pending_orders[symbol]
+                        logger.critical(f"🎯 动量追入成功 {symbol} {side} @ ${current_price:.2f}")
+                        continue
+
+            # 3. 检查价格回踩（触及 VWAP → 限价成交）
+            if side == 'LONG' and current_price <= vwap:
+                # 做多回踩到 VWAP → 成交
+                logger.info(f"✅ {symbol} 回踩到 VWAP ${vwap:.2f}，当前价 ${current_price:.2f} → 限价成交")
+
+                position = self.position_manager.calculate_sniper_position(
+                    symbol=symbol,
+                    capital=self.capital,
+                    side=side,
+                    entry_price=vwap,  # 使用 VWAP 作为入场价
+                    stop_distance_pct=0.02
+                )
+
+                if position:
+                    self.position_manager.open_position(position)
+                    del self.pending_orders[symbol]
+                    logger.critical(f"🎯 限价成交成功 {symbol} {side} @ ${vwap:.2f}")
+                    continue
+
+            elif side == 'SHORT' and current_price >= vwap:
+                # 做空回踩到 VWAP → 成交
+                logger.info(f"✅ {symbol} 回踩到 VWAP ${vwap:.2f}，当前价 ${current_price:.2f} → 限价成交")
+
+                position = self.position_manager.calculate_sniper_position(
+                    symbol=symbol,
+                    capital=self.capital,
+                    side=side,
+                    entry_price=vwap,  # 使用 VWAP 作为入场价
+                    stop_distance_pct=0.02
+                )
+
+                if position:
+                    self.position_manager.open_position(position)
+                    del self.pending_orders[symbol]
+                    logger.critical(f"🎯 限价成交成功 {symbol} {side} @ ${vwap:.2f}")
+                    continue
 
     async def update_positions(self):
         """更新仓位（移动止盈、止损检查）"""
@@ -169,15 +311,16 @@ class SniperTrader:
 
     async def run(self):
         """
-        主循环（极低频）
+        v5.2: 主循环（极低频 + 挂单管理）
 
         策略：
         - 每 15 分钟检查一次 MTF 三重共振
+        - 每次循环检查挂单状态（TTL、动量代偿、回踩成交）
         - 平时只更新移动止盈
         - 一天最多 1-2 次开仓机会
         """
         logger.info("\n" + "="*60)
-        logger.info("🎯 v5.0 狙击手模式启动")
+        logger.info("🎯 v5.2 终极防弹狙击手模式启动")
         logger.info("="*60 + "\n")
 
         check_interval = 15 * 60  # 15 分钟检查一次
@@ -189,7 +332,10 @@ class SniperTrader:
                 # 1. 更新仓位
                 await self.update_positions()
 
-                # 2. 检查是否可以开新仓
+                # 2. v5.2: 检查挂单状态（TTL、动量代偿、回踩成交）
+                await self.check_pending_orders()
+
+                # 3. 检查是否可以开新仓
                 if len(self.position_manager.positions) < self.position_manager.max_positions:
                     # 遍历监控交易对
                     for symbol in self.watch_symbols:
@@ -200,10 +346,14 @@ class SniperTrader:
                             logger.critical(message)
                             break
 
-                # 3. 打印统计
+                # 4. 打印统计
                 stats = self.position_manager.get_trading_statistics()
                 if stats['total_trades'] > 0:
                     logger.info(f"📊 交易统计: {stats['total_trades']} 笔 | 胜率 {stats['win_rate']:.0%} | 总盈亏 ${stats['total_pnl']:+.2f}")
+
+                # v5.2: 打印挂单状态
+                if self.pending_orders:
+                    logger.info(f"📝 挂单中: {', '.join(self.pending_orders.keys())}")
 
                 logger.info(f"⏰ 下次扫描: {check_interval // 60} 分钟后\n")
 
