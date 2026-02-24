@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-v5.0 狙击手模式主交易脚本（Sniper Mode Trading Service）
+v5.3 狙击手模式主交易脚本（Sniper Mode Trading Service）
 
 针对 200 USDT 超小资金的极低频、极高置信度交易系统：
 - MTF 三重共振锁开仓
 - 高杠杆孤注一掷（50% 资金）
 - 移动止盈追求 1:5 盈亏比
 - 把爆仓线当止损线
+- Dry-Run 模式支持
+- Telegram/Discord 实时预警
 """
 import asyncio
 import logging
@@ -14,18 +16,29 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
+from enum import Enum
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 from dotenv import load_dotenv
+
 from src.exchange.exchange_info_manager import BinanceExchangeInfo
-from src.exchange.sniper_position_manager import SniperPositionManager
-from src.quantitative.mtf_resonance_lock import MTFResonanceLock
+from src.exchange.sniper_position_manager import (
+    SniperPositionManager,
+    Side,
+    CloseReason
+)
+from src.quantitative.mtf_resonance_lock import MTFResonanceLock, MTFSignal
+from src.utils.webhook_alerter import WebhookAlerter, get_alerter
+from src.utils.api_retry import exponential_backoff_retry, classify_binance_error
 
 load_dotenv()
+
+# 确保 logs 目录存在
+Path('logs').mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,34 +51,51 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class DryRunMode(Enum):
+    """Dry-Run 模式"""
+    ENABLED = "DRY_RUN"
+    DISABLED = "LIVE"
+
+
 class SniperTrader:
     """
-    v5.2 狙击手交易器（终极防弹版）
+    v5.3 狙击手交易器（军工级战备版）
 
     核心理念：
     - 极低频（一周 1-2 次）
     - 极高置信度（三重共振）
     - 高杠杆孤注一掷（50% 资金）
     - 1:5 盈亏比（移动止盈）
-    - 动态波动率安全垫（废除 5 tick）
-    - 订单生命周期 + 动量代偿（防止踏空）
+    - 动态波动率安全垫
+    - 订单生命周期 + 动量代偿
+    - Dry-Run 模式支持
+    - Telegram/Discord 实时预警
     """
 
-    def __init__(self, testnet: bool = True):
+    def __init__(
+        self,
+        testnet: bool = True,
+        dry_run: bool = True,
+        capital: float = 200.0
+    ) -> None:
         """
         初始化狙击手交易器
 
         Args:
             testnet: 是否测试网
+            dry_run: 是否启用 Dry-Run 模式
+            capital: 总资金（USDT）
         """
         self.testnet = testnet
-        self.capital = 200  # USDT（超小资金）
+        self.dry_run = dry_run
+        self.capital = capital
 
         # 初始化组件
-        logger.info("初始化 v5.2 狙击手交易器...")
+        logger.info("初始化 v5.3 狙击手交易器...")
         self.exchange_info = BinanceExchangeInfo(testnet=testnet)
         self.position_manager = SniperPositionManager(self.exchange_info)
         self.mtf_lock = MTFResonanceLock()
+        self.alerter = get_alerter()
 
         # 监控的交易对
         self.watch_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
@@ -73,26 +103,37 @@ class SniperTrader:
         # 运行状态
         self.running = True
 
-        # v5.2: 挂单追踪（订单生命周期管理）
-        self.pending_orders = {}  # {symbol: {'signal': MTFSignal, 'timestamp': datetime, 'side': str}}
+        # 挂单追踪（订单生命周期管理）
+        self.pending_orders: Dict[str, Dict] = {}
 
-        logger.info(f"✅ v5.2 狙击手交易器已初始化")
-        logger.info(f"  测试网: {'是' if testnet else '否（主网！）'}")
+        # 打印配置
+        self._print_config()
+
+    def _print_config(self) -> None:
+        """打印配置信息"""
+        logger.info(f"\n{'='*60}")
+        logger.info(f"🎯 v5.3 狙击手交易器已初始化")
+        logger.info(f"{'='*60}")
+        logger.info(f"  测试网: {'是' if self.testnet else '否（主网！）'}")
+        logger.info(f"  模式: {'🧪 DRY-RUN（模拟）' if self.dry_run else '🔴 LIVE（实盘！）'}")
         logger.info(f"  资金: ${self.capital} USDT")
         logger.info(f"  监控交易对: {', '.join(self.watch_symbols)}")
-        logger.info(f"  订单 TTL: 1 小时（4 根 15m K线）")
+        logger.info(f"  订单 TTL: 1 小时")
         logger.info(f"  动量代偿: 5 分钟内创新高/低 → 市价追入")
+        logger.info(f"{'='*60}\n")
 
+    @exponential_backoff_retry(max_retries=3, base_delay=2.0)
     async def check_and_trade(self, symbol: str) -> Optional[str]:
         """
-        v5.2: 检查并执行交易（增加订单生命周期 + 动量代偿）
+        检查并执行交易（订单生命周期 + 动量代偿 + Dry-Run）
 
         流程：
         1. MTF 三重共振检查
-        2. 如果锁定，检查是否等待回踩
-        3. 如果需要回踩，挂单等待（TTL 1 小时）
-        4. 监控动量：5 分钟内创新高/低 → 市价追入
-        5. 执行开仓
+        2. 如果锁定，发送预警
+        3. 检查是否等待回踩
+        4. 如果需要回踩，挂单等待（TTL 1 小时）
+        5. 监控动量：5 分钟内创新高/低 → 市价追入
+        6. 执行开仓（或模拟）
 
         Args:
             symbol: 交易对
@@ -107,60 +148,119 @@ class SniperTrader:
         if signal.signal == 0 or not signal.is_locked:
             return None
 
-        # 3. 检查是否允许开仓
+        # 3. 发送三重共振预警
+        side_str = 'LONG' if signal.signal == 1 else 'SHORT'
+        await self.alerter.alert_resonance_locked(
+            symbol=symbol,
+            side=side_str,
+            confidence=signal.confidence,
+            reasons=signal.reasons,
+            entry_price=signal.breakthrough_price,
+            vwap=signal.suggested_entry_price
+        )
+
+        # 4. 检查是否允许开仓
         can_open, reason = self.position_manager.can_open_position(symbol)
         if not can_open:
             logger.warning(f"无法开仓 {symbol}: {reason}")
             return None
 
-        # 4. 获取当前价格
+        # 5. 获取当前价格
         ticker = self.exchange_info.exchange.fetch_ticker(symbol)
         current_price = ticker['last']
 
-        # 5. v5.2: 判断是否需要等待回踩
+        # 6. 判断是否需要等待回踩
         if signal.wait_for_pullback and signal.suggested_entry_price:
             # 挂单等待回踩
             self.pending_orders[symbol] = {
                 'signal': signal,
                 'timestamp': datetime.now(),
-                'side': 'LONG' if signal.signal == 1 else 'SHORT',
+                'side': Side.LONG if signal.signal == 1 else Side.SHORT,
                 'vwap': signal.suggested_entry_price,
                 'breakthrough_price': signal.breakthrough_price,
             }
 
             logger.info(f"📝 {symbol} 挂单等待回踩 VWAP ${signal.suggested_entry_price:.2f}")
-            logger.info(f"  突破价格: ${signal.breakthrough_price:.2f}")
-            logger.info(f"  当前价格: ${current_price:.2f}")
-            logger.info(f"  TTL: 1 小时（超时自动撤销）")
-            logger.info(f"  动量代偿: 5 分钟内创新高/低 → 市价追入")
 
             return f"📝 挂单等待 {symbol} 回踩 VWAP ${signal.suggested_entry_price:.2f}"
 
-        # 6. 不需要回踩，直接市价开仓
-        side = 'LONG' if signal.signal == 1 else 'SHORT'
+        # 7. 不需要回踩，直接市价开仓
+        side = Side.LONG if signal.signal == 1 else Side.SHORT
         position = self.position_manager.calculate_sniper_position(
             symbol=symbol,
             capital=self.capital,
             side=side,
             entry_price=current_price,
-            stop_distance_pct=0.02
         )
 
         if not position:
             logger.error(f"❌ 仓位计算失败: {symbol}")
             return None
 
-        # 7. 开仓
+        # 8. 执行开仓（或模拟）
+        return await self._execute_open_position(position, current_price, "MARKET")
+
+    async def _execute_open_position(
+        self,
+        position,
+        execution_price: float,
+        fill_type: str
+    ) -> Optional[str]:
+        """
+        执行开仓（支持 Dry-Run）
+
+        Args:
+            position: 仓位对象
+            execution_price: 成交价格
+            fill_type: 成交类型（MARKET / LIMIT / MARKET_MOMENTUM）
+
+        Returns:
+            交易结果消息
+        """
+        symbol = position.symbol
+        side_str = position.side.value
+
+        # Dry-Run 模式
+        if self.dry_run:
+            logger.critical(f"🧪 [DRY-RUN] 模拟开仓：{symbol} {side_str} @ ${execution_price:.2f}")
+            logger.critical(f"   杠杆: {position.leverage}x")
+            logger.critical(f"   数量: {position.quantity:.6f}")
+            logger.critical(f"   止损价: ${position.stop_loss_price:.2f}")
+            logger.critical(f"   止盈价: ${position.take_profit_price:.2f}")
+            logger.critical(f"   类型: {fill_type}")
+
+            # 模拟开仓（不实际调用 API）
+            self.position_manager.open_position(position)
+
+            return f"🧪 [DRY-RUN] 模拟开仓 {symbol} {side_str} @ ${execution_price:.2f}"
+
+        # 实盘模式
+        logger.critical(f"🔴 [LIVE] 实盘开仓：{symbol} {side_str} @ ${execution_price:.2f}")
+
+        # TODO: 调用 Binance API 下单
+        # order = self.exchange_info.exchange.create_market_order(...)
+        # 验证订单成功后，再开仓
+
         self.position_manager.open_position(position)
 
-        message = f"🎯 已开仓 {symbol} {side} @ ${current_price:.2f}"
-        logger.critical(message)
+        # 发送订单成交预警
+        await self.alerter.alert_order_filled(
+            symbol=symbol,
+            side=side_str,
+            entry_price=execution_price,
+            quantity=position.quantity,
+            leverage=position.leverage,
+            stop_loss=position.stop_loss_price,
+            take_profit=position.take_profit_price,
+            fill_type=fill_type
+        )
 
-        return message
+        return f"🎯 已开仓 {symbol} {side_str} @ ${execution_price:.2f}"
 
-    async def check_pending_orders(self):
+    @exponential_backoff_retry(max_retries=3, base_delay=2.0)
+    async def check_pending_orders(self) -> None:
         """
-        v5.2: 检查挂单状态（生命周期 + 动量代偿）
+        检查挂单状态（生命周期 + 动量代偿）
 
         逻辑：
         1. 检查挂单 TTL（超时 1 小时 → 撤销）
@@ -197,84 +297,73 @@ class SniperTrader:
 
             # 2. 检查动量代偿（5 分钟内创新高/低）
             if holding_minutes <= 5:
-                # 检查是否创新高/低
-                if side == 'LONG' and current_price > breakthrough_price:
+                if side == Side.LONG and current_price > breakthrough_price:
                     # 做多创新高 → 市价追入
-                    logger.critical(f"🚀 {symbol} 动量代偿触发！价格 ${current_price:.2f} > 突破价 ${breakthrough_price:.2f} → 市价追入！")
+                    logger.critical(f"🚀 {symbol} 动量代偿触发！价格 ${current_price:.2f} > 突破价 ${breakthrough_price:.2f}")
 
-                    # 计算仓位
                     position = self.position_manager.calculate_sniper_position(
                         symbol=symbol,
                         capital=self.capital,
                         side=side,
                         entry_price=current_price,
-                        stop_distance_pct=0.02
                     )
 
                     if position:
-                        self.position_manager.open_position(position)
+                        await self._execute_open_position(position, current_price, "MARKET_MOMENTUM")
                         del self.pending_orders[symbol]
-                        logger.critical(f"🎯 动量追入成功 {symbol} {side} @ ${current_price:.2f}")
                         continue
 
-                elif side == 'SHORT' and current_price < breakthrough_price:
+                elif side == Side.SHORT and current_price < breakthrough_price:
                     # 做空创新低 → 市价追入
-                    logger.critical(f"🚀 {symbol} 动量代偿触发！价格 ${current_price:.2f} < 突破价 ${breakthrough_price:.2f} → 市价追入！")
+                    logger.critical(f"🚀 {symbol} 动量代偿触发！价格 ${current_price:.2f} < 突破价 ${breakthrough_price:.2f}")
 
-                    # 计算仓位
                     position = self.position_manager.calculate_sniper_position(
                         symbol=symbol,
                         capital=self.capital,
                         side=side,
                         entry_price=current_price,
-                        stop_distance_pct=0.02
                     )
 
                     if position:
-                        self.position_manager.open_position(position)
+                        await self._execute_open_position(position, current_price, "MARKET_MOMENTUM")
                         del self.pending_orders[symbol]
-                        logger.critical(f"🎯 动量追入成功 {symbol} {side} @ ${current_price:.2f}")
                         continue
 
             # 3. 检查价格回踩（触及 VWAP → 限价成交）
-            if side == 'LONG' and current_price <= vwap:
+            if side == Side.LONG and current_price <= vwap:
                 # 做多回踩到 VWAP → 成交
-                logger.info(f"✅ {symbol} 回踩到 VWAP ${vwap:.2f}，当前价 ${current_price:.2f} → 限价成交")
+                logger.info(f"✅ {symbol} 回踩到 VWAP ${vwap:.2f}")
 
                 position = self.position_manager.calculate_sniper_position(
                     symbol=symbol,
                     capital=self.capital,
                     side=side,
-                    entry_price=vwap,  # 使用 VWAP 作为入场价
-                    stop_distance_pct=0.02
+                    entry_price=vwap,
                 )
 
                 if position:
-                    self.position_manager.open_position(position)
+                    await self._execute_open_position(position, vwap, "LIMIT")
                     del self.pending_orders[symbol]
-                    logger.critical(f"🎯 限价成交成功 {symbol} {side} @ ${vwap:.2f}")
                     continue
 
-            elif side == 'SHORT' and current_price >= vwap:
+            elif side == Side.SHORT and current_price >= vwap:
                 # 做空回踩到 VWAP → 成交
-                logger.info(f"✅ {symbol} 回踩到 VWAP ${vwap:.2f}，当前价 ${current_price:.2f} → 限价成交")
+                logger.info(f"✅ {symbol} 回踩到 VWAP ${vwap:.2f}")
 
                 position = self.position_manager.calculate_sniper_position(
                     symbol=symbol,
                     capital=self.capital,
                     side=side,
-                    entry_price=vwap,  # 使用 VWAP 作为入场价
-                    stop_distance_pct=0.02
+                    entry_price=vwap,
                 )
 
                 if position:
-                    self.position_manager.open_position(position)
+                    await self._execute_open_position(position, vwap, "LIMIT")
                     del self.pending_orders[symbol]
-                    logger.critical(f"🎯 限价成交成功 {symbol} {side} @ ${vwap:.2f}")
                     continue
 
-    async def update_positions(self):
-        """更新仓位（移动止盈、止损检查）"""
+    async def update_positions(self) -> None:
+        """更新仓位（移动止盈、止损检查 + 预警）"""
         if not self.position_manager.positions:
             return
 
@@ -292,38 +381,89 @@ class SniperTrader:
         emergency_close, reason = self.position_manager.should_emergency_close_all(prices)
         if emergency_close:
             logger.critical(f"🚨 紧急平仓触发！{reason}")
+
             for symbol, exit_price in prices.items():
-                self.position_manager.close_position(symbol, exit_price, reason='STOP_LOSS')
+                position = self.position_manager.positions.get(symbol)
+                if position:
+                    self.position_manager.close_position(symbol, exit_price, CloseReason.STOP_LOSS)
+
+                    # 发送预警
+                    await self.alerter.alert_stop_loss(
+                        symbol=symbol,
+                        side=position.side.value,
+                        entry_price=position.entry_price,
+                        exit_price=exit_price,
+                        pnl=position.pnl,
+                    )
             return
 
-        # 2. 更新移动止盈
+        # 2. 检查每个仓位的平仓条件
         for symbol, current_price in prices.items():
-            self.position_manager.update_trailing_stop(symbol, current_price)
+            should_close, reason, close_reason = self.position_manager.should_close_position(symbol, current_price)
 
-            # 3. 检查移动止盈触发
-            if self.position_manager.check_trailing_stop_trigger(symbol, current_price):
-                self.position_manager.close_position(symbol, current_price, reason='TRAILING_STOP')
+            if should_close:
+                position = self.position_manager.positions.get(symbol)
+                if not position:
+                    continue
+
+                # 平仓
+                closed_position = self.position_manager.close_position(symbol, current_price, close_reason)
+
+                if closed_position:
+                    # 根据平仓原因发送不同预警
+                    if close_reason == CloseReason.TIME_STOP:
+                        holding_duration = datetime.now() - position.entry_time
+                        holding_hours = holding_duration.total_seconds() / 3600
+                        roe = self.position_manager.calculate_roe(position, current_price)
+
+                        await self.alerter.alert_time_stop(
+                            symbol=symbol,
+                            side=position.side.value,
+                            holding_hours=holding_hours,
+                            roe=roe
+                        )
+
+                    elif close_reason == CloseReason.TRAILING_STOP:
+                        roe = self.position_manager.calculate_roe(position, current_price)
+
+                        await self.alerter.alert_trailing_stop(
+                            symbol=symbol,
+                            side=position.side.value,
+                            entry_price=position.entry_price,
+                            exit_price=current_price,
+                            pnl=position.pnl,
+                            roe=roe
+                        )
+
+                continue
+
+            # 3. 更新移动止盈
+            self.position_manager.update_trailing_stop(symbol, current_price)
 
         # 4. 打印当前盈亏
         total_pnl, total_pnl_pct = self.position_manager.get_total_unrealized_pnl(prices)
         if total_pnl != 0:
             logger.info(f"💰 当前盈亏: ${total_pnl:+.2f} ({total_pnl_pct:+.2%})")
 
-    async def run(self):
+    async def run(self, check_interval_minutes: int = 15) -> None:
         """
-        v5.2: 主循环（极低频 + 挂单管理）
+        主循环（极低频 + 挂单管理）
 
         策略：
-        - 每 15 分钟检查一次 MTF 三重共振
-        - 每次循环检查挂单状态（TTL、动量代偿、回踩成交）
+        - 每 N 分钟检查一次 MTF 三重共振
+        - 每次循环检查挂单状态
         - 平时只更新移动止盈
         - 一天最多 1-2 次开仓机会
+
+        Args:
+            check_interval_minutes: 检查间隔（分钟）
         """
         logger.info("\n" + "="*60)
-        logger.info("🎯 v5.2 终极防弹狙击手模式启动")
+        logger.info(f"🎯 v5.3 终极防弹狙击手模式启动")
+        logger.info(f"{'🧪 DRY-RUN 模式' if self.dry_run else '🔴 LIVE 实盘模式'}")
         logger.info("="*60 + "\n")
 
-        check_interval = 15 * 60  # 15 分钟检查一次
+        check_interval = check_interval_minutes * 60  # 转换为秒
 
         while self.running:
             try:
@@ -332,32 +472,33 @@ class SniperTrader:
                 # 1. 更新仓位
                 await self.update_positions()
 
-                # 2. v5.2: 检查挂单状态（TTL、动量代偿、回踩成交）
+                # 2. 检查挂单状态
                 await self.check_pending_orders()
 
                 # 3. 检查是否可以开新仓
                 if len(self.position_manager.positions) < self.position_manager.max_positions:
-                    # 遍历监控交易对
                     for symbol in self.watch_symbols:
                         message = await self.check_and_trade(symbol)
 
-                        # 如果开仓成功，停止扫描其他交易对
                         if message:
                             logger.critical(message)
-                            break
+                            break  # 最多开一个仓
 
                 # 4. 打印统计
                 stats = self.position_manager.get_trading_statistics()
                 if stats['total_trades'] > 0:
-                    logger.info(f"📊 交易统计: {stats['total_trades']} 笔 | 胜率 {stats['win_rate']:.0%} | 总盈亏 ${stats['total_pnl']:+.2f}")
+                    logger.info(
+                        f"📊 交易统计: {stats['total_trades']} 笔 | "
+                        f"胜率 {stats['win_rate']:.0%} | "
+                        f"总盈亏 ${stats['total_pnl']:+.2f}"
+                    )
 
-                # v5.2: 打印挂单状态
+                # 打印挂单状态
                 if self.pending_orders:
                     logger.info(f"📝 挂单中: {', '.join(self.pending_orders.keys())}")
 
                 logger.info(f"⏰ 下次扫描: {check_interval // 60} 分钟后\n")
 
-                # 等待下一次扫描
                 await asyncio.sleep(check_interval)
 
             except KeyboardInterrupt:
@@ -369,15 +510,20 @@ class SniperTrader:
 
         logger.info("🛑 狙击手交易器已停止")
 
-    async def close(self):
+    async def close(self) -> None:
         """清理资源"""
         await self.mtf_lock.close()
+        await self.alerter.close()
 
 
 def main():
     """主函数"""
+    # 从环境变量读取配置
     testnet = os.getenv('BINANCE_TESTNET', 'true').lower() == 'true'
+    dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
+    capital = float(os.getenv('CAPITAL', '200'))
 
+    # 主网模式确认
     if not testnet:
         logger.critical("⚠️⚠️⚠️ 主网模式！将使用真实资金！⚠️⚠️⚠️")
         confirm = input("确认继续？(yes/no): ")
@@ -385,7 +531,15 @@ def main():
             logger.info("已取消")
             return
 
-    trader = SniperTrader(testnet=testnet)
+    # 实盘模式确认
+    if not dry_run:
+        logger.critical("⚠️⚠️⚠️ LIVE 实盘模式！将使用真实资金下单！⚠️⚠️⚠️")
+        confirm = input("确认继续？(yes/no): ")
+        if confirm.lower() != 'yes':
+            logger.info("已取消")
+            return
+
+    trader = SniperTrader(testnet=testnet, dry_run=dry_run, capital=capital)
 
     try:
         asyncio.run(trader.run())
