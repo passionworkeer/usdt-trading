@@ -20,13 +20,19 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MTFSignal:
-    """MTF 信号"""
+    """v5.1 MTF 信号（增加入场价格信息）"""
     symbol: str
     signal: int  # 1=做多, -1=做空, 0=无信号
     confidence: float  # 信号置信度（0-1）
     reasons: List[str]  # 信号原因
     timestamp: datetime
     is_locked: bool  # 是否被锁（满足三重共振）
+
+    # v5.1: 入场价格信息（拒绝市价追高）
+    breakthrough_price: Optional[float] = None  # 突破 K 线价格
+    breakthrough_vwap: Optional[float] = None  # 突破 K 线 VWAP
+    suggested_entry_price: Optional[float] = None  # 建议入场价（回踩价）
+    wait_for_pullback: bool = False  # 是否等待回踩
 
 
 class MTFResonanceLock:
@@ -125,13 +131,20 @@ class MTFResonanceLock:
 
     async def fetch_funding_and_oi(self, symbol: str) -> Tuple[int, str]:
         """
-        条件 2: 极端 Open Interest/资金费率偏离
+        v5.1: 条件 2 - 极端资金费率 + ΔOI 激增（历史对比）
+
+        修正：
+        - 不再使用 OI 绝对值（废纸！）
+        - 必须计算过去 1 小时/4 小时的 OI 变化率 ΔOI
+        - 只有极端费率 + ΔOI 激增 > 5% 才算真正拥挤
 
         逻辑：
-        - 获取资金费率（8 小时结算）
-        - 获取 Open Interest（未平仓合约）
-        - 极度正费率（> 0.05%）+ OI 增长 → 多头过度拥挤 → 做空信号
-        - 极度负费率（< -0.05%）+ OI 增长 → 空头过度拥挤 → 做多信号
+        1. 获取资金费率
+        2. 获取当前 OI
+        3. 获取历史 OI（1 小时前）
+        4. 计算 ΔOI = (OI_current - OI_1h_ago) / OI_1h_ago
+        5. 极端正费率（> 0.05%）+ ΔOI > 5% → 多头过度拥挤 → 做空信号
+        6. 极度负费率（< -0.05%）+ ΔOI > 5% → 空头过度拥挤 → 做多信号
 
         Args:
             symbol: 交易对
@@ -145,9 +158,18 @@ class MTFResonanceLock:
         funding_url = "https://fapi.binance.com/fapi/v1/premiumIndex"
         funding_params = {'symbol': symbol.replace('/', '')}
 
-        # 2. 获取 Open Interest
+        # 2. 获取当前 OI
         oi_url = "https://fapi.binance.com/fapi/v1/openInterest"
         oi_params = {'symbol': symbol.replace('/', '')}
+
+        # 3. 获取历史 OI（1 小时前）
+        # 使用 /fapi/v1/openInterestHist 获取历史 OI
+        oi_hist_url = "https://fapi.binance.com/fapi/v1/openInterestHist"
+        oi_hist_params = {
+            'symbol': symbol.replace('/', ''),
+            'period': '5m',  # 5 分钟粒度
+            'limit': 12,  # 获取最近 12 个点（1 小时）
+        }
 
         try:
             # 并发请求
@@ -157,33 +179,62 @@ class MTFResonanceLock:
             async with self.session.get(oi_url, params=oi_params) as oi_resp:
                 oi_data = await oi_resp.json()
 
+            async with self.session.get(oi_hist_url, params=oi_hist_params) as oi_hist_resp:
+                oi_hist_data = await oi_hist_resp.json()
+
             # 解析资金费率
             funding_rate = float(funding_data.get('lastFundingRate', 0))
             mark_price = float(funding_data.get('markPrice', 0))
 
-            # 解析 OI
-            open_interest = float(oi_data.get('openInterest', 0))
+            # 解析当前 OI
+            current_oi = float(oi_data.get('openInterest', 0))
+
+            # 解析历史 OI（1 小时前）
+            if isinstance(oi_hist_data, list) and len(oi_hist_data) >= 12:
+                # 取第一个点（1 小时前）
+                oi_1h_ago = float(oi_hist_data[0].get('openInterest', 0))
+
+                # 计算 ΔOI（变化率）
+                delta_oi = (current_oi - oi_1h_ago) / oi_1h_ago if oi_1h_ago > 0 else 0
+            else:
+                # 如果无法获取历史数据，降级为 0
+                logger.warning(f"无法获取 {symbol} 历史 OI 数据，ΔOI 降级为 0")
+                delta_oi = 0
+                oi_1h_ago = 0
 
             # 存储缓存
             self.funding_rates[symbol] = funding_rate
-            self.open_interests[symbol] = open_interest
+            self.open_interests[symbol] = current_oi
 
-            # 判断极端偏离
-            # 阈值：0.05%（正常是 ±0.01%）
+            # 判断极端偏离 + OI 激增
             signal = 0
             reason = ""
 
             if funding_rate > 0.0005:  # 0.05% 极度正费率
-                signal = -1  # 做空信号
-                reason = f"极度正费率: {funding_rate:.4%}（多头过度拥挤）+ OI: {open_interest:,.0f} → 做空信号"
+                if delta_oi > 0.05:  # ΔOI 激增 > 5%
+                    signal = -1  # 做空信号
+                    reason = (f"极度正费率: {funding_rate:.4%} + ΔOI 激增: {delta_oi:.2%} "
+                             f"(当前 OI: {current_oi:,.0f}, 1h 前: {oi_1h_ago:,.0f}) "
+                             f"→ 多头过度拥挤，做空信号")
+                else:
+                    signal = 0  # 信号不成立
+                    reason = f"正费率: {funding_rate:.4%} 但 ΔOI 仅 {delta_oi:.2%}（未达 5% 阈值）→ 无信号"
+
             elif funding_rate < -0.0005:  # -0.05% 极度负费率
-                signal = 1  # 做多信号
-                reason = f"极度负费率: {funding_rate:.4%}（空头过度拥挤）+ OI: {open_interest:,.0f} → 做多信号"
+                if delta_oi > 0.05:  # ΔOI 激增 > 5%
+                    signal = 1  # 做多信号
+                    reason = (f"极度负费率: {funding_rate:.4%} + ΔOI 激增: {delta_oi:.2%} "
+                             f"(当前 OI: {current_oi:,.0f}, 1h 前: {oi_1h_ago:,.0f}) "
+                             f"→ 空头过度拥挤，做多信号")
+                else:
+                    signal = 0  # 信号不成立
+                    reason = f"负费率: {funding_rate:.4%} 但 ΔOI 仅 {delta_oi:.2%}（未达 5% 阈值）→ 无信号"
+
             else:
                 signal = 0
                 reason = f"费率正常: {funding_rate:.4%}，无极端偏离"
 
-            logger.info(f"【资金费率/OI】{symbol}: {reason}")
+            logger.info(f"【资金费率/ΔOI】{symbol}: {reason}")
 
             return signal, reason
 
@@ -191,21 +242,27 @@ class MTFResonanceLock:
             logger.error(f"获取资金费率/OI 失败: {e}")
             return 0, f"获取数据异常: {e}"
 
-    async def fetch_15m_volume_spike(self, symbol: str) -> Tuple[int, str]:
+    async def fetch_15m_volume_spike(self, symbol: str) -> Tuple[int, str, Optional[Dict]]:
         """
-        条件 3: 15m 精准放量猎杀
+        v5.1: 条件 3 - 15m 精准放量猎杀（增加回踩入场价格）
+
+        修正：
+        - 不再在放量瞬间给出信号
+        - 必须计算突破 K 线的 VWAP
+        - 返回建议入场价（突破 K 线均价或 VWAP）
 
         逻辑：
-        - 获取 15m K 线（最近 100 根）
-        - 计算平均成交量
-        - 当前成交量 > 平均 × 2 → 放量确认
-        - 结合价格突破方向判断信号
+        1. 获取 15m K 线（最近 100 根）
+        2. 计算平均成交量
+        3. 当前成交量 > 平均 × 2 → 放量确认
+        4. 计算突破 K 线的 VWAP
+        5. 建议入场价 = VWAP（等待回踩）
 
         Args:
             symbol: 交易对
 
         Returns:
-            (信号方向, 原因)
+            (信号方向, 原因, 入场信息字典)
         """
         await self.init_session()
 
@@ -221,7 +278,7 @@ class MTFResonanceLock:
                 data = await response.json()
 
                 if response.status != 200 or not data:
-                    return 0, "无法获取 15m 数据"
+                    return 0, "无法获取 15m 数据", None
 
                 # 解析 K 线
                 df = pd.DataFrame(data, columns=[
@@ -232,6 +289,9 @@ class MTFResonanceLock:
 
                 df['close'] = df['close'].astype(float)
                 df['volume'] = df['volume'].astype(float)
+                df['quote_volume'] = df['quote_volume'].astype(float)
+                df['high'] = df['high'].astype(float)
+                df['low'] = df['low'].astype(float)
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
                 # 计算平均成交量（最近 50 根，排除最新）
@@ -249,14 +309,44 @@ class MTFResonanceLock:
                 # 判断放量突破
                 signal = 0
                 reason = ""
+                entry_info = None
 
                 if volume_ratio >= 2.0:  # 成交量 >= 2倍平均
+                    # 计算突破 K 线的 VWAP
+                    # VWAP = Σ(价格 × 成交量) / 总成交量
+                    # 使用 (high + low + close) / 3 作为典型价格
+                    typical_price = (df['high'].iloc[-1] + df['low'].iloc[-1] + df['close'].iloc[-1]) / 3
+                    vwap = (typical_price * current_volume) / current_volume if current_volume > 0 else current_price
+
+                    # 计算 K 线均价
+                    candle_avg_price = (df['open'].iloc[-1] + df['close'].iloc[-1] + df['high'].iloc[-1] + df['low'].iloc[-1]) / 4
+
                     if price_change_pct > 0.005:  # 价格上涨 > 0.5%
                         signal = 1
                         reason = f"15m 放量上涨：成交量 {volume_ratio:.1f}x 平均，价格上涨 {price_change_pct:.2%} → 做多信号"
+
+                        # 建议入场价 = VWAP（等待回踩）
+                        entry_info = {
+                            'breakthrough_price': current_price,
+                            'breakthrough_vwap': vwap,
+                            'suggested_entry_price': vwap,  # 建议回踩 VWAP 入场
+                            'wait_for_pullback': True,
+                        }
+                        reason += f" | 建议等待回踩 VWAP ${vwap:.2f} 入场"
+
                     elif price_change_pct < -0.005:  # 价格下跌 < -0.5%
                         signal = -1
                         reason = f"15m 放量下跌：成交量 {volume_ratio:.1f}x 平均，价格下跌 {price_change_pct:.2%} → 做空信号"
+
+                        # 建议入场价 = VWAP（等待回踩）
+                        entry_info = {
+                            'breakthrough_price': current_price,
+                            'breakthrough_vwap': vwap,
+                            'suggested_entry_price': vwap,  # 建议回踩 VWAP 入场
+                            'wait_for_pullback': True,
+                        }
+                        reason += f" | 建议等待回踩 VWAP ${vwap:.2f} 入场"
+
                     else:
                         signal = 0
                         reason = f"15m 放量但无方向：成交量 {volume_ratio:.1f}x 平均，价格横盘"
@@ -266,20 +356,20 @@ class MTFResonanceLock:
 
                 logger.info(f"【15m 放量】{symbol}: {reason}")
 
-                return signal, reason
+                return signal, reason, entry_info
 
         except Exception as e:
             logger.error(f"获取 15m 放量失败: {e}")
-            return 0, f"获取数据异常: {e}"
+            return 0, f"获取数据异常: {e}", None
 
     async def check_triple_resonance(self, symbol: str) -> MTFSignal:
         """
-        v5.0 核心：检查三重共振
+        v5.1 核心：检查三重共振（增加回踩入场）
 
         规则：
         - 必须同时满足三个条件
         - 任何一环不满足 = 无信号
-        - 返回信号置信度
+        - 返回信号置信度 + 入场价格信息
 
         Args:
             symbol: 交易对
@@ -294,7 +384,7 @@ class MTFResonanceLock:
         # 并发获取三个条件
         trend_4h, reason_4h = await self.fetch_4h_trend(symbol)
         funding_oi, reason_funding = await self.fetch_funding_and_oi(symbol)
-        volume_15m, reason_volume = await self.fetch_15m_volume_spike(symbol)
+        volume_15m, reason_volume, entry_info = await self.fetch_15m_volume_spike(symbol)
 
         # 检查三重共振
         reasons = [reason_4h, reason_funding, reason_volume]
@@ -342,6 +432,15 @@ class MTFResonanceLock:
         for i, (reason, signal) in enumerate(zip(reasons, signals), 1):
             status = "✅" if signal == final_signal else "❌" if signal != 0 else "⚪"
             logger.info(f"  {status} {i}. {reason}")
+
+        # 打印入场信息
+        if is_locked and entry_info:
+            logger.info(f"\n💡 入场建议:")
+            logger.info(f"  突破价格: ${entry_info['breakthrough_price']:.2f}")
+            logger.info(f"  突破 VWAP: ${entry_info['breakthrough_vwap']:.2f}")
+            logger.info(f"  建议入场价: ${entry_info['suggested_entry_price']:.2f}（等待回踩）")
+            logger.info(f"  ⚠️ 拒绝市价追高！必须等待回踩 VWAP 入场！")
+
         logger.info(f"{'='*60}\n")
 
         return MTFSignal(
@@ -350,7 +449,11 @@ class MTFResonanceLock:
             confidence=confidence,
             reasons=reasons,
             timestamp=datetime.now(),
-            is_locked=is_locked
+            is_locked=is_locked,
+            breakthrough_price=entry_info.get('breakthrough_price') if entry_info else None,
+            breakthrough_vwap=entry_info.get('breakthrough_vwap') if entry_info else None,
+            suggested_entry_price=entry_info.get('suggested_entry_price') if entry_info else None,
+            wait_for_pullback=entry_info.get('wait_for_pullback', False) if entry_info else False,
         )
 
     async def close(self):
