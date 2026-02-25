@@ -34,8 +34,7 @@ from src.exchange.sniper_position_manager import (
 from src.quantitative.mtf_resonance_lock import MTFResonanceLock, MTFSignal
 from src.utils.webhook_alerter import WebhookAlerter, get_alerter
 from src.utils.api_retry import exponential_backoff_retry, classify_binance_error
-from src.monitoring.monitoring_collector import MonitoringCollector
-from src.monitoring.monitoring_server import MonitoringServer
+from src.monitoring.state_broadcaster import StateBroadcaster
 
 load_dotenv()
 
@@ -79,8 +78,7 @@ class SniperTrader:
         testnet: bool = True,
         dry_run: bool = True,
         capital: float = 200.0,
-        enable_monitoring: bool = True,
-        monitoring_port: int = 8765,
+        enable_broadcaster: bool = True,
     ) -> None:
         """
         初始化狙击手交易器
@@ -89,17 +87,15 @@ class SniperTrader:
             testnet: 是否测试网
             dry_run: 是否启用 Dry-Run 模式
             capital: 总资金（USDT）
-            enable_monitoring: 是否启用监控服务
-            monitoring_port: 监控服务端口
+            enable_broadcaster: 是否启用状态广播（Redis Pub/Sub）
         """
         self.testnet = testnet
         self.dry_run = dry_run
         self.capital = capital
-        self.enable_monitoring = enable_monitoring
-        self.monitoring_port = monitoring_port
+        self.enable_broadcaster = enable_broadcaster
 
         # 初始化组件
-        logger.info("初始化 v5.3 狙击手交易器...")
+        logger.info("初始化 v7.3 狙击手交易器...")
         self.exchange_info = BinanceExchangeInfo(testnet=testnet)
         self.position_manager = SniperPositionManager(self.exchange_info)
         self.mtf_lock = MTFResonanceLock()
@@ -114,22 +110,13 @@ class SniperTrader:
         # 挂单追踪（订单生命周期管理）
         self.pending_orders: Dict[str, Dict] = {}
 
-        # 初始化监控服务
-        self.monitoring_collector = None
-        self.monitoring_server = None
+        # 初始化状态广播器（进程间通信，非阻塞）
+        self.state_broadcaster = None
 
-        if self.enable_monitoring:
-            logger.info("初始化监控服务...")
-            self.monitoring_collector = MonitoringCollector(
-                position_manager=self.position_manager,
-                obi_interceptor=None,  # 可以后续添加
-                ws_pool=None,  # 可以后续添加
-            )
-            self.monitoring_server = MonitoringServer(
-                collector=self.monitoring_collector,
-                port=self.monitoring_port,
-            )
-            logger.info(f"📊 监控面板: http://localhost:{self.monitoring_port}")
+        if self.enable_broadcaster:
+            logger.info("初始化状态广播器...")
+            self.state_broadcaster = StateBroadcaster()
+            logger.info("📡 状态广播器已启动（Redis Pub/Sub）")
 
         # 打印配置
         self._print_config()
@@ -137,7 +124,7 @@ class SniperTrader:
     def _print_config(self) -> None:
         """打印配置信息"""
         logger.info(f"\n{'='*60}")
-        logger.info(f"🎯 v5.3 狙击手交易器已初始化")
+        logger.info(f"🎯 v7.3 狙击手交易器已初始化")
         logger.info(f"{'='*60}")
         logger.info(f"  测试网: {'是' if self.testnet else '否（主网！）'}")
         logger.info(f"  模式: {'🧪 DRY-RUN（模拟）' if self.dry_run else '🔴 LIVE（实盘！）'}")
@@ -145,8 +132,8 @@ class SniperTrader:
         logger.info(f"  监控交易对: {', '.join(self.watch_symbols)}")
         logger.info(f"  订单 TTL: 1 小时")
         logger.info(f"  动量代偿: 5 分钟内创新高/低 → 市价追入")
-        if self.enable_monitoring:
-            logger.info(f"  监控面板: http://localhost:{self.monitoring_port}")
+        if self.enable_broadcaster:
+            logger.info(f"  状态广播: Redis Pub/Sub（独立进程监控）")
         logger.info(f"{'='*60}\n")
 
     @exponential_backoff_retry(max_retries=3, base_delay=2.0)
@@ -196,9 +183,9 @@ class SniperTrader:
         ticker = self.exchange_info.exchange.fetch_ticker(symbol)
         current_price = ticker['last']
 
-        # 更新监控价格缓存
-        if self.monitoring_collector:
-            await self.monitoring_collector.update_price_cache(symbol, current_price)
+        # 异步广播价格更新（非阻塞）
+        if self.state_broadcaster:
+            await self.state_broadcaster.broadcast_price(symbol, current_price)
 
         # 6. 判断是否需要等待回踩
         if signal.wait_for_pullback and signal.suggested_entry_price:
@@ -263,9 +250,9 @@ class SniperTrader:
             # 模拟开仓（不实际调用 API）
             self.position_manager.open_position(position)
 
-            # 记录监控事件
-            if self.monitoring_server:
-                self.monitoring_server.add_event({
+            # 异步广播开仓事件（非阻塞）
+            if self.state_broadcaster:
+                await self.state_broadcaster.broadcast_event({
                     'type': 'open',
                     'symbol': symbol,
                     'side': side_str,
@@ -284,9 +271,9 @@ class SniperTrader:
 
         self.position_manager.open_position(position)
 
-        # 记录监控事件
-        if self.monitoring_server:
-            self.monitoring_server.add_event({
+        # 异步广播开仓事件（非阻塞）
+        if self.state_broadcaster:
+            await self.state_broadcaster.broadcast_event({
                 'type': 'open',
                 'symbol': symbol,
                 'side': side_str,
@@ -425,9 +412,9 @@ class SniperTrader:
                 ticker = self.exchange_info.exchange.fetch_ticker(symbol)
                 prices[symbol] = ticker['last']
 
-                # 更新监控价格缓存
-                if self.monitoring_collector:
-                    await self.monitoring_collector.update_price_cache(symbol, prices[symbol])
+                # 异步广播价格更新（非阻塞）
+                if self.state_broadcaster:
+                    await self.state_broadcaster.broadcast_price(symbol, prices[symbol])
 
             except Exception as e:
                 logger.error(f"获取 {symbol} 价格失败: {e}")
@@ -466,9 +453,9 @@ class SniperTrader:
                 closed_position = self.position_manager.close_position(symbol, current_price, close_reason)
 
                 if closed_position:
-                    # 记录监控事件
-                    if self.monitoring_server:
-                        self.monitoring_server.add_event({
+                    # 异步广播平仓事件（非阻塞）
+                    if self.state_broadcaster:
+                        await self.state_broadcaster.broadcast_event({
                             'type': 'close',
                             'symbol': symbol,
                             'side': position.side.value,
@@ -528,14 +515,9 @@ class SniperTrader:
             check_interval_minutes: 检查间隔（分钟）
         """
         logger.info("\n" + "="*60)
-        logger.info(f"🎯 v5.3 终极防弹狙击手模式启动")
+        logger.info(f"🎯 v7.3 终极防弹狙击手模式启动")
         logger.info(f"{'🧪 DRY-RUN 模式' if self.dry_run else '🔴 LIVE 实盘模式'}")
         logger.info("="*60 + "\n")
-
-        # 启动监控服务（后台任务）
-        if self.enable_monitoring and self.monitoring_server:
-            logger.info(f"📊 启动监控服务...")
-            asyncio.create_task(self.monitoring_server.start())
 
         check_interval = check_interval_minutes * 60  # 转换为秒
 
@@ -588,10 +570,10 @@ class SniperTrader:
         """清理资源"""
         logger.info("清理资源...")
 
-        # 停止监控服务
-        if self.monitoring_server:
-            self.monitoring_server.stop()
-            logger.info("📊 监控服务已停止")
+        # 关闭状态广播器
+        if self.state_broadcaster:
+            await self.state_broadcaster.close()
+            logger.info("📡 状态广播器已关闭")
 
         await self.mtf_lock.close()
         await self.alerter.close()
