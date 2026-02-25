@@ -7,9 +7,11 @@ v5.3: 狙击手仓位管理器（Sniper Position Manager）
 - 动态波动率安全垫
 - ROE 移动止盈
 - 12 小时时间止损
+- P2-20: 动态杠杆上限（根据波动率调整）
 """
 import logging
 import asyncio
+import statistics
 from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -209,6 +211,87 @@ class SniperPositionManager:
             logger.warning(f"⚠️ 动态缓冲计算失败，降级为 0.3%: ${fallback_buffer:.2f} ({e})")
             return fallback_buffer
 
+    def calculate_market_volatility(
+        self,
+        exchange,
+        symbol: str,
+        periods: int = 24
+    ) -> float:
+        """
+        P2-20: 计算 24 小时历史波动率（百分比）
+
+        Args:
+            exchange: 交易所实例
+            symbol: 交易对
+            periods: K线周期数（1小时周期），默认 24 小时
+
+        Returns:
+            波动率百分比（如 2.0 表示 2%）
+        """
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, '1h', limit=periods)
+            closes = [c[4] for c in ohlcv]
+
+            if len(closes) < 2:
+                logger.warning(f"{symbol} K线数据不足，使用默认波动率 2%")
+                return 2.0
+
+            # 计算收益率
+            returns = [(closes[i] - closes[i-1]) / closes[i-1] for i in range(1, len(closes))]
+
+            if len(returns) < 2:
+                return 2.0
+
+            # 计算标准差
+            volatility = statistics.stdev(returns)
+
+            return volatility * 100  # 转换为百分比
+
+        except Exception as e:
+            logger.warning(f"波动率计算失败: {e}，使用默认波动率 2%")
+            return 2.0
+
+    def calculate_dynamic_leverage(
+        self,
+        volatility: float,
+        base_leverage: int = 20
+    ) -> Tuple[int, str]:
+        """
+        P2-20: 根据波动率动态调整最大杠杆
+
+        策略：
+        - 波动率 > 5% (高波动): 杠杆减半，最大 3x
+        - 波动率 3-5% (中波动): 保持基础杠杆，最大 5x
+        - 波动率 < 3% (低波动): 杠杆+2，最大 10x
+
+        Args:
+            volatility: 波动率百分比
+            base_leverage: 基础杠杆倍数
+
+        Returns:
+            (调整后的杠杆, 调整原因)
+        """
+        if volatility > 5:
+            # 高波动：大幅降低杠杆，防止爆仓
+            dynamic_leverage = min(base_leverage // 2, 3)
+            reason = f"高波动环境 (波动率 {volatility:.2f}% > 5%)，降杠杆至 {dynamic_leverage}x"
+        elif volatility > 3:
+            # 中波动：保持基础杠杆
+            dynamic_leverage = min(base_leverage, 5)
+            reason = f"中等波动环境 (波动率 {volatility:.2f}% 在 3-5%)，杠杆限制 {dynamic_leverage}x"
+        else:
+            # 低波动：可适当提高杠杆
+            dynamic_leverage = min(base_leverage + 2, 10)
+            reason = f"低波动环境 (波动率 {volatility:.2f}% < 3%)，杠杆提升至 {dynamic_leverage}x"
+
+        logger.info(f"📊 P2-20 动态杠杆计算:")
+        logger.info(f"  24h 波动率: {volatility:.2f}%")
+        logger.info(f"  基础杠杆: {base_leverage}x")
+        logger.info(f"  动态杠杆: {dynamic_leverage}x")
+        logger.info(f"  原因: {reason}")
+
+        return dynamic_leverage, reason
+
     def calculate_safety_cushion(
         self,
         liquidation_price: float,
@@ -319,23 +402,26 @@ class SniperPositionManager:
         symbol: str,
         capital: float,
         side: Side,
-        entry_price: float
+        entry_price: float,
+        exchange=None
     ) -> Optional[SniperPosition]:
         """
-        计算狙击手仓位（孤注一掷模型 + 真实强平价）
+        计算狙击手仓位（孤注一掷模型 + 真实强平价 + P2-20 动态杠杆）
 
         策略：
         1. 使用 50% 资金作为保证金
-        2. 自动调整杠杆满足 MIN_NOTIONAL
-        3. 计算真实强平价（基于 MMR）
-        4. 把止损线设在强平价前置动态安全垫
-        5. 目标盈利 = 5 × 止损距离
+        2. P2-20: 根据波动率动态调整杠杆上限
+        3. 自动调整杠杆满足 MIN_NOTIONAL
+        4. 计算真实强平价（基于 MMR）
+        5. 把止损线设在强平价前置动态安全垫
+        6. 目标盈利 = 5 × 止损距离
 
         Args:
             symbol: 交易对
             capital: 总资金（USDT）
             side: 交易方向
             entry_price: 入场价格
+            exchange: 交易所实例（可选，用于动态杠杆计算）
 
         Returns:
             SniperPosition 对象，如果计算失败返回 None
@@ -343,9 +429,19 @@ class SniperPositionManager:
         # 计算可用保证金（50% 资金）
         margin = capital * self.position_ratio
 
-        # 自动计算杠杆和数量
+        # P2-20: 动态杠杆计算
+        base_leverage = 20
+        if exchange is not None:
+            volatility = self.calculate_market_volatility(exchange, symbol)
+            max_leverage, leverage_reason = self.calculate_dynamic_leverage(volatility, base_leverage)
+            logger.info(f"📊 {leverage_reason}")
+        else:
+            max_leverage = base_leverage
+            logger.info(f"📊 使用默认杠杆上限: {max_leverage}x")
+
+        # 自动计算杠杆和数量（使用动态杠杆上限）
         quantity, leverage, feasible = self.exchange_info.calculate_min_quantity_for_capital(
-            symbol, margin, leverage=20
+            symbol, margin, leverage=max_leverage
         )
 
         if not feasible:

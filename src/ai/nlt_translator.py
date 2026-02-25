@@ -7,6 +7,8 @@ import logging
 from typing import Dict, Optional
 from datetime import datetime
 
+from .sentiment_analyzer import SentimentAnalyzer
+
 logger = logging.getLogger(__name__)
 
 
@@ -16,6 +18,9 @@ class NLTDataTranslator:
     def __init__(self):
         """初始化翻译器"""
         self.last_report_time = None
+        # VADER 情绪分析器（v7.4 升级，P2-18）
+        self.sentiment_analyzer = SentimentAnalyzer()
+        logger.info("NLTDataTranslator 初始化完成，已加载 VADER 情绪分析器")
 
     def translate_micro_snapshot(self, snapshot: Dict) -> str:
         """
@@ -147,28 +152,31 @@ class NLTDataTranslator:
         if not tweets:
             return "Twitter 情绪：暂无数据。"
 
-        # 简单的情绪判断（基于关键词）
-        bullish_keywords = ['moon', 'bull', 'buy', 'pump', 'rocket']
-        bearish_keywords = ['crash', 'bear', 'sell', 'dump', 'scam']
+        # 使用 VADER 专业情绪分析（v7.4 升级，P2-18）
+        texts = [tweet['text'] for tweet in tweets]
+        batch_result = self.sentiment_analyzer.analyze_batch(texts)
 
-        bullish_count = 0
-        bearish_count = 0
+        # 获取中文情绪标签
+        sentiment_label = self.sentiment_analyzer.get_sentiment_label(
+            batch_result['avg_score']
+        )
 
-        for tweet in tweets:
-            text = tweet['text'].lower()
-            if any(kw in text for kw in bullish_keywords):
-                bullish_count += 1
-            if any(kw in text for kw in bearish_keywords):
-                bearish_count += 1
-
-        # 判断整体情绪
-        total = len(tweets)
-        if bullish_count > bearish_count * 1.5:
-            sentiment = "极度贪婪"
-        elif bearish_count > bullish_count * 1.5:
-            sentiment = "极度恐慌"
+        # 根据情绪强度调整描述
+        avg_score = batch_result['avg_score']
+        if avg_score >= 0.5:
+            sentiment_desc = f"极度贪婪（VADER 分数: {avg_score:.2f}）"
+        elif avg_score >= 0.2:
+            sentiment_desc = f"贪婪（VADER 分数: {avg_score:.2f}）"
+        elif avg_score >= 0.05:
+            sentiment_desc = f"偏多（VADER 分数: {avg_score:.2f}）"
+        elif avg_score >= -0.05:
+            sentiment_desc = f"中性（VADER 分数: {avg_score:.2f}）"
+        elif avg_score >= -0.2:
+            sentiment_desc = f"偏空（VADER 分数: {avg_score:.2f}）"
+        elif avg_score >= -0.5:
+            sentiment_desc = f"恐慌（VADER 分数: {avg_score:.2f}）"
         else:
-            sentiment = "分歧严重"
+            sentiment_desc = f"极度恐慌（VADER 分数: {avg_score:.2f}）"
 
         # 提取高赞推文样本
         top_tweets = sorted(tweets, key=lambda x: x.get('likes', 0), reverse=True)[:3]
@@ -178,9 +186,14 @@ class NLTDataTranslator:
         ]
 
         report = (
-            f"Twitter 情绪：过去 1 小时共 {total} 条推文，整体情绪{sentiment}。"
+            f"Twitter 情绪：过去 1 小时共 {batch_result['count']} 条推文，"
+            f"整体情绪{sentiment_desc}。"
+            f"正面占比 {batch_result['positive_pct']*100:.1f}%，"
+            f"负面占比 {batch_result['negative_pct']*100:.1f}%。"
             f"高赞推文样本：" + " | ".join(samples)
         )
+
+        logger.debug(f"Twitter 情绪分析完成: {sentiment_label}, 样本数: {len(tweets)}")
 
         return report
 

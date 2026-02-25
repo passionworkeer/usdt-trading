@@ -42,6 +42,14 @@ from .time_sync_manager import (
     ensure_time_sync,
 )
 
+# P2-22: 相关性检查器
+from .correlation_checker import (
+    CorrelationChecker,
+    Position,
+    CorrelationCheckResult,
+    check_position_correlation,
+)
+
 __all__ = [
     # API 重试
     'exponential_backoff_retry',
@@ -68,4 +76,9 @@ __all__ = [
     'TimeSyncManager',
     'get_time_sync_manager',
     'ensure_time_sync',
+    # P2-22: 相关性检查器
+    'CorrelationChecker',
+    'Position',
+    'CorrelationCheckResult',
+    'check_position_correlation',
 ]

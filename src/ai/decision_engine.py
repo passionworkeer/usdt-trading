@@ -1,12 +1,14 @@
 """
 AI 决策引擎 - 使用 Claude API 进行交易决策
+
+P2-25: 增加了 AI 决策完整日志记录功能
 """
 import os
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, asdict
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -27,18 +29,306 @@ class TradingDecision:
     indicators: Dict[str, Any] = None
 
 
+class AIDecisionLogger:
+    """
+    P2-25: AI 决策日志记录器
+
+    记录完整决策过程以便追溯和审计：
+    - 输入请求（市场数据、指标等）
+    - AI 响应（原始响应）
+    - 最终决策（解析后的决策）
+    - 执行结果（可选）
+    """
+
+    def __init__(
+        self,
+        log_dir: str = 'logs/ai_decisions',
+        use_jsonl: bool = True,
+    ):
+        """
+        初始化 AI 决策日志记录器
+
+        Args:
+            log_dir: 日志目录
+            use_jsonl: 是否使用 JSONL 格式（每行一个 JSON）
+        """
+        self.log_dir = log_dir
+        self.use_jsonl = use_jsonl
+
+        # 确保目录存在
+        os.makedirs(log_dir, exist_ok=True)
+
+        logger.info(f"📝 AI 决策日志记录器已初始化: {log_dir}")
+
+    def log_decision(
+        self,
+        request: Dict[str, Any],
+        response: Optional[Dict[str, Any]],
+        decision: TradingDecision,
+        execution_result: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        记录完整决策过程
+
+        Args:
+            request: 请求数据（市场数据、指标等）
+            response: AI 原始响应
+            decision: 解析后的决策
+            execution_result: 执行结果（可选）
+
+        Returns:
+            日志文件路径
+        """
+        timestamp = datetime.now().isoformat()
+
+        # 构建日志条目
+        log_entry = {
+            'timestamp': timestamp,
+            'request': self._sanitize_request(request),
+            'response': response,
+            'decision': self._serialize_decision(decision),
+            'execution_result': execution_result,
+        }
+
+        # 添加元数据
+        log_entry['metadata'] = {
+            'request_id': self._generate_request_id(timestamp, request.get('symbol', 'unknown')),
+            'symbol': request.get('symbol', 'unknown'),
+            'action': decision.action,
+            'confidence': decision.confidence,
+            'risk_level': decision.risk_level,
+            'executed': execution_result is not None,
+        }
+
+        # 保存日志
+        if self.use_jsonl:
+            return self._save_jsonl(log_entry)
+        else:
+            return self._save_json(log_entry, timestamp)
+
+    def _sanitize_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        清理请求数据（移除敏感信息）
+
+        Args:
+            request: 原始请求
+
+        Returns:
+            清理后的请求
+        """
+        # 创建副本避免修改原始数据
+        sanitized = request.copy()
+
+        # 移除可能的敏感字段
+        sensitive_keys = ['api_key', 'secret', 'password', 'token']
+        for key in sensitive_keys:
+            if key in sanitized:
+                sanitized[key] = '***REDACTED***'
+
+        return sanitized
+
+    def _serialize_decision(self, decision: TradingDecision) -> Dict[str, Any]:
+        """
+        序列化决策对象
+
+        Args:
+            decision: 交易决策
+
+        Returns:
+            决策字典
+        """
+        return {
+            'action': decision.action,
+            'confidence': decision.confidence,
+            'reasoning': decision.reasoning,
+            'suggested_amount': decision.suggested_amount,
+            'stop_loss_pct': decision.stop_loss_pct,
+            'take_profit_pct': decision.take_profit_pct,
+            'risk_level': decision.risk_level,
+            'indicators': decision.indicators,
+        }
+
+    def _generate_request_id(self, timestamp: str, symbol: str) -> str:
+        """生成请求ID"""
+        return f"{symbol}_{timestamp.replace(':', '-').replace('.', '-')}"
+
+    def _save_jsonl(self, log_entry: Dict[str, Any]) -> str:
+        """保存为 JSONL 格式"""
+        date_str = datetime.now().strftime('%Y%m%d')
+        filename = f"{self.log_dir}/{date_str}.jsonl"
+
+        try:
+            with open(filename, 'a', encoding='utf-8') as f:
+                f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+
+            logger.debug(f"已保存 AI 决策日志: {filename}")
+            return filename
+
+        except Exception as e:
+            logger.error(f"保存 AI 决策日志失败: {e}")
+            return ""
+
+    def _save_json(self, log_entry: Dict[str, Any], timestamp: str) -> str:
+        """保存为独立 JSON 文件"""
+        date_str = timestamp[:10]  # YYYY-MM-DD
+        time_str = timestamp[11:19].replace(':', '-')  # HH-MM-SS
+        filename = f"{self.log_dir}/{date_str}_{time_str}.json"
+
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(log_entry, f, ensure_ascii=False, indent=2)
+
+            logger.debug(f"已保存 AI 决策日志: {filename}")
+            return filename
+
+        except Exception as e:
+            logger.error(f"保存 AI 决策日志失败: {e}")
+            return ""
+
+    def get_decision_history(
+        self,
+        symbol: Optional[str] = None,
+        action: Optional[str] = None,
+        date: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """
+        获取决策历史
+
+        Args:
+            symbol: 交易对过滤
+            action: 动作过滤
+            date: 日期过滤 (YYYYMMDD)
+            limit: 返回数量限制
+
+        Returns:
+            决策历史列表
+        """
+        if date is None:
+            date = datetime.now().strftime('%Y%m%d')
+
+        filename = f"{self.log_dir}/{date}.jsonl"
+
+        if not os.path.exists(filename):
+            return []
+
+        try:
+            decisions = []
+            with open(filename, 'r', encoding='utf-8') as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line.strip())
+
+                        # 应用过滤
+                        if symbol and entry.get('metadata', {}).get('symbol') != symbol:
+                            continue
+                        if action and entry.get('metadata', {}).get('action') != action:
+                            continue
+
+                        decisions.append(entry)
+
+                        if len(decisions) >= limit:
+                            break
+
+                    except json.JSONDecodeError:
+                        continue
+
+            return decisions
+
+        except Exception as e:
+            logger.error(f"读取决策历史失败: {e}")
+            return []
+
+    def get_decision_statistics(
+        self,
+        days: int = 30,
+    ) -> Dict[str, Any]:
+        """
+        获取决策统计
+
+        Args:
+            days: 统计天数
+
+        Returns:
+            决策统计
+        """
+        stats = {
+            'total_decisions': 0,
+            'actions': {},
+            'avg_confidence': 0,
+            'execution_rate': 0,
+            'executed_count': 0,
+        }
+
+        total_confidence = 0.0
+        executed_count = 0
+
+        for i in range(days):
+            date = datetime.now() - timedelta(days=i)
+            date_str = date.strftime('%Y%m%d')
+            filename = f"{self.log_dir}/{date_str}.jsonl"
+
+            if not os.path.exists(filename):
+                continue
+
+            try:
+                with open(filename, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            entry = json.loads(line.strip())
+                            stats['total_decisions'] += 1
+
+                            # 统计动作
+                            action = entry.get('metadata', {}).get('action', 'unknown')
+                            stats['actions'][action] = stats['actions'].get(action, 0) + 1
+
+                            # 统计置信度
+                            confidence = entry.get('metadata', {}).get('confidence', 0)
+                            total_confidence += confidence
+
+                            # 统计执行率
+                            if entry.get('metadata', {}).get('executed'):
+                                executed_count += 1
+
+                        except json.JSONDecodeError:
+                            continue
+
+            except Exception as e:
+                logger.warning(f"读取 {date_str} 决策日志失败: {e}")
+
+        # 计算平均值
+        if stats['total_decisions'] > 0:
+            stats['avg_confidence'] = total_confidence / stats['total_decisions']
+            stats['execution_rate'] = executed_count / stats['total_decisions']
+            stats['executed_count'] = executed_count
+
+        return stats
+
+
 class ClaudeDecisionEngine:
     """Claude AI 决策引擎"""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        enable_logging: bool = True,
+    ):
         """
         初始化决策引擎
 
         Args:
             api_key: Anthropic API key（可选，默认从环境变量读取）
+            enable_logging: 是否启用决策日志记录
         """
         self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
         self.client = None
+        self.enable_logging = enable_logging
+        self.decision_logger = None
+
+        # 初始化日志记录器
+        if enable_logging:
+            self.decision_logger = AIDecisionLogger()
+            logger.info("AI 决策日志记录已启用")
 
         if self.api_key:
             try:
@@ -237,9 +527,27 @@ Respond ONLY with the JSON, no additional text.
         Returns:
             交易决策
         """
+        # 构建请求数据（用于日志记录）
+        request_data = {
+            'symbol': symbol,
+            'price': price,
+            'price_history': price_history[-20:] if len(price_history) > 20 else price_history,  # 限制长度
+            'market_data': market_data,
+        }
+
         if not self.client:
             logger.warning("Claude 客户端未初始化，使用保守技术分析降级方案")
-            return self._conservative_fallback(symbol, price, price_history, market_data)
+            decision = self._conservative_fallback(symbol, price, price_history, market_data)
+
+            # 记录决策（fallback 模式）
+            if self.decision_logger:
+                self.decision_logger.log_decision(
+                    request=request_data,
+                    response=None,
+                    decision=decision,
+                )
+
+            return decision
 
         try:
             prompt = self._build_analysis_prompt(symbol, price, price_history, market_data)
@@ -282,15 +590,81 @@ Respond ONLY with the JSON, no additional text.
             logger.info(f"Claude 决策: {decision.action} (置信度: {decision.confidence:.2f})")
             logger.info(f"原因: {decision.reasoning}")
 
+            # P2-25: 记录决策过程
+            if self.decision_logger:
+                self.decision_logger.log_decision(
+                    request=request_data,
+                    response={
+                        'raw_content': content,
+                        'parsed_result': result,
+                    },
+                    decision=decision,
+                )
+
             return decision
 
         except json.JSONDecodeError as e:
             logger.error(f"解析 Claude 响应失败: {e}")
             logger.error(f"原始响应内容: {content[:500] if 'content' in locals() else 'N/A'}")
-            return self._conservative_fallback(symbol, price, price_history, market_data)
+            decision = self._conservative_fallback(symbol, price, price_history, market_data)
+
+            # 记录失败决策
+            if self.decision_logger:
+                self.decision_logger.log_decision(
+                    request=request_data,
+                    response={'error': str(e)},
+                    decision=decision,
+                )
+
+            return decision
         except Exception as e:
             logger.error(f"Claude API 调用失败: {e}")
-            return self._conservative_fallback(symbol, price, price_history, market_data)
+            decision = self._conservative_fallback(symbol, price, price_history, market_data)
+
+            # 记录失败决策
+            if self.decision_logger:
+                self.decision_logger.log_decision(
+                    request=request_data,
+                    response={'error': str(e)},
+                    decision=decision,
+                )
+
+            return decision
+
+    def log_execution_result(
+        self,
+        symbol: str,
+        decision: TradingDecision,
+        execution_result: Dict[str, Any],
+    ) -> None:
+        """
+        P2-25: 记录交易执行结果
+
+        Args:
+            symbol: 交易对
+            decision: 交易决策
+            execution_result: 执行结果
+        """
+        if not self.decision_logger:
+            return
+
+        # 构建请求数据的最小版本
+        request_data = {
+            'symbol': symbol,
+            'action': decision.action,
+            'confidence': decision.confidence,
+            'risk_level': decision.risk_level,
+        }
+
+        # 记录执行结果
+        self.decision_logger.log_decision(
+            request=request_data,
+            response=None,
+            decision=decision,
+            execution_result=execution_result,
+        )
+
+        logger.info(f"已记录执行结果: {symbol} - {execution_result.get('status', 'unknown')}")
 
     def should_execute_trade(self, decision: TradingDecision,
                             min_confidence: float = 0.7) -> bool:

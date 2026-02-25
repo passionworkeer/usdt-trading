@@ -3,7 +3,7 @@
 """
 import os
 import logging
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from dotenv import load_dotenv
@@ -278,6 +278,161 @@ class RiskManager:
             'last_trade_time': self.last_trade_time.isoformat() if self.last_trade_time else None,
             'last_reset_date': self.last_reset_date.isoformat(),
         }
+
+
+class DailyLossLimiter:
+    """日损失百分比限制器"""
+
+    def __init__(self, max_loss_pct: float = 0.10, initial_capital: float = 200):
+        """
+        Args:
+            max_loss_pct: 最大日损失百分比（默认 10%）
+            initial_capital: 初始资金
+        """
+        self.max_loss_pct = max_loss_pct
+        self.initial_capital = initial_capital
+        self.daily_high = initial_capital
+        self.daily_start = initial_capital
+        self.last_reset = datetime.now().date()
+
+    def update(self, current_capital: float) -> Dict:
+        """更新并检查损失限制"""
+        today = datetime.now().date()
+
+        # 新的一天，重置
+        if today > self.last_reset:
+            self.daily_start = current_capital
+            self.daily_high = current_capital
+            self.last_reset = today
+
+        # 更新高点
+        if current_capital > self.daily_high:
+            self.daily_high = current_capital
+
+        # 计算当日损失
+        daily_loss = (self.daily_high - current_capital) / self.daily_high
+        loss_pct = daily_loss * 100
+
+        return {
+            'allowed': loss_pct < (self.max_loss_pct * 100),
+            'loss_pct': loss_pct,
+            'max_allowed_pct': self.max_loss_pct * 100,
+            'remaining_pct': max(0, (self.max_loss_pct * 100) - loss_pct)
+        }
+
+    def can_trade(self, current_capital: float) -> bool:
+        """检查是否允许交易"""
+        result = self.update(current_capital)
+        return result['allowed']
+
+    def reset(self, initial_capital: float):
+        """
+        重置限制器
+
+        Args:
+            initial_capital: 新的初始资金
+        """
+        self.initial_capital = initial_capital
+        self.daily_start = initial_capital
+        self.daily_high = initial_capital
+        self.last_reset = datetime.now().date()
+
+
+class TradingCooldown:
+    """交易冷却期管理器"""
+
+    def __init__(self, min_interval_seconds: int = 3600, loss_cooldown_seconds: int = 7200):
+        """
+        Args:
+            min_interval_seconds: 最小交易间隔（默认 1 小时）
+            loss_cooldown_seconds: 连续亏损后冷却时间（默认 2 小时）
+        """
+        self.min_interval = timedelta(seconds=min_interval_seconds)
+        self.loss_cooldown = timedelta(seconds=loss_cooldown_seconds)
+        self.last_trade_time: Optional[datetime] = None
+        self.consecutive_losses = 0
+        self.loss_cooldown_until: Optional[datetime] = None
+        self.trade_history: List[Dict] = []
+
+    def can_trade(self) -> bool:
+        """检查是否可以交易"""
+        now = datetime.now()
+
+        # 检查亏损冷却
+        if self.loss_cooldown_until and now < self.loss_cooldown_until:
+            return False
+
+        # 检查最小间隔
+        if self.last_trade_time and (now - self.last_trade_time) < self.min_interval:
+            return False
+
+        return True
+
+    def on_trade_result(self, profit: float) -> None:
+        """记录交易结果"""
+        self.last_trade_time = datetime.now()
+
+        trade_record = {
+            'timestamp': self.last_trade_time,
+            'profit': profit,
+            'consecutive_losses_before': self.consecutive_losses
+        }
+        self.trade_history.append(trade_record)
+
+        if profit < 0:
+            self.consecutive_losses += 1
+            if self.consecutive_losses >= 3:
+                self.loss_cooldown_until = datetime.now() + self.loss_cooldown
+                logger.warning(
+                    f"触发连续亏损冷却: 连续亏损 {self.consecutive_losses} 次, "
+                    f"冷却至 {self.loss_cooldown_until.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+        else:
+            self.consecutive_losses = 0
+            logger.debug(f"交易盈利，重置连续亏损计数")
+
+    def get_status(self) -> Dict:
+        """获取冷却状态"""
+        now = datetime.now()
+        in_loss_cooldown = (
+            self.loss_cooldown_until is not None and
+            now < self.loss_cooldown_until
+        )
+
+        time_since_last_trade = None
+        if self.last_trade_time:
+            time_since_last_trade = (now - self.last_trade_time).total_seconds()
+
+        remaining_cooldown = None
+        if in_loss_cooldown:
+            remaining_cooldown = (self.loss_cooldown_until - now).total_seconds()
+
+        return {
+            'can_trade': self.can_trade(),
+            'in_loss_cooldown': in_loss_cooldown,
+            'remaining_cooldown_seconds': remaining_cooldown,
+            'consecutive_losses': self.consecutive_losses,
+            'time_since_last_trade': time_since_last_trade,
+            'min_interval_seconds': self.min_interval.total_seconds(),
+        }
+
+    def force_cooldown(self, duration_seconds: int) -> None:
+        """
+        强制进入冷却期
+
+        Args:
+            duration_seconds: 冷却时长（秒）
+        """
+        self.loss_cooldown_until = datetime.now() + timedelta(seconds=duration_seconds)
+        logger.warning(f"强制进入冷却期至: {self.loss_cooldown_until.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    def reset(self) -> None:
+        """重置冷却器"""
+        self.last_trade_time = None
+        self.consecutive_losses = 0
+        self.loss_cooldown_until = None
+        self.trade_history = []
+        logger.info("交易冷却器已重置")
 
 
 if __name__ == '__main__':

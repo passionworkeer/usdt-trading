@@ -699,6 +699,7 @@ class SniperTrader:
             capital=self.capital,
             side=side,
             entry_price=current_price,
+            exchange=self.exchange_info.exchange
         )
 
         if not position:
@@ -710,7 +711,7 @@ class SniperTrader:
             try:
                 latest_price = self.exchange_info.exchange.fetch_ticker(symbol)['last']
                 passed, slippage_reason = self.slippage_guard.check_slippage(
-                    symbol, latest_price
+                    symbol, latest_price, exchange=self.exchange_info.exchange
                 )
                 if not passed:
                     logger.warning(f"🚨 {slippage_reason}")
@@ -937,6 +938,7 @@ class SniperTrader:
                         capital=self.capital,
                         side=side,
                         entry_price=current_price,
+                        exchange=self.exchange_info.exchange
                     )
 
                     if position:
@@ -957,6 +959,7 @@ class SniperTrader:
                         capital=self.capital,
                         side=side,
                         entry_price=current_price,
+                        exchange=self.exchange_info.exchange
                     )
 
                     if position:
@@ -978,6 +981,7 @@ class SniperTrader:
                     capital=self.capital,
                     side=side,
                     entry_price=vwap,
+                    exchange=self.exchange_info.exchange
                 )
 
                 if position:
@@ -998,6 +1002,7 @@ class SniperTrader:
                     capital=self.capital,
                     side=side,
                     entry_price=vwap,
+                    exchange=self.exchange_info.exchange
                 )
 
                 if position:
