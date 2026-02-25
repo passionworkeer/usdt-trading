@@ -1,5 +1,5 @@
 """
-v6.0 工具模块
+v6.1 工具模块
 """
 
 # API 重试
@@ -35,6 +35,13 @@ from .system_lock import (
     disable_network_power_saving,
 )
 
+# 时间同步管理器（v6.1 新增）
+from .time_sync_manager import (
+    TimeSyncManager,
+    get_time_sync_manager,
+    ensure_time_sync,
+)
+
 __all__ = [
     # API 重试
     'exponential_backoff_retry',
@@ -57,4 +64,8 @@ __all__ = [
     'WindowsSystemLock',
     'get_system_lock',
     'disable_network_power_saving',
+    # 时间同步
+    'TimeSyncManager',
+    'get_time_sync_manager',
+    'ensure_time_sync',
 ]

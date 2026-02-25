@@ -73,6 +73,8 @@ class BinanceExchangeInfo:
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'future',
+                # v6.1: 禁用 CCXT 的默认时间同步，使用我们自己的
+                'adjustForTimeDifference': False,  # 我们自己管理时间偏移
             },
         })
 
@@ -85,6 +87,9 @@ class BinanceExchangeInfo:
         # 加载市场
         self.exchange.load_markets()
         logger.info(f"✅ 已加载 {len(self.exchange.markets)} 个交易对规则")
+
+        # v6.1: 初始化时间同步管理器
+        self.time_sync_manager = None
 
     def fetch_symbol_info(self, symbol: str) -> SymbolInfo:
         """
