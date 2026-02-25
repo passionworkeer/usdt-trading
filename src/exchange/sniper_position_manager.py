@@ -209,6 +209,111 @@ class SniperPositionManager:
             logger.warning(f"⚠️ 动态缓冲计算失败，降级为 0.3%: ${fallback_buffer:.2f} ({e})")
             return fallback_buffer
 
+    def calculate_safety_cushion(
+        self,
+        liquidation_price: float,
+        leverage: int
+    ) -> float:
+        """
+        v5.4: 计算强平价安全垫（Safety Cushion）
+
+        防止止损价过于接近强平价，增加额外缓冲确保主动止损：
+
+        安全垫策略（根据杠杆动态调整）：
+        - 杠杆 ≤ 10x: 2% 强平价缓冲
+        - 杠杆 11-20x: 3% 强平价缓冲
+        - 杠杆 > 20x: 4% 强平价缓冲
+
+        公式：
+        safety_cushion = liquidation_price × cushion_percentage
+
+        Args:
+            liquidation_price: 强平价格
+            leverage: 杠杆倍数
+
+        Returns:
+            安全垫金额（USDT）
+        """
+        # 根据杠杆动态调整安全垫比例
+        if leverage <= 10:
+            cushion_pct = 0.02  # 2%
+        elif leverage <= 20:
+            cushion_pct = 0.03  # 3%
+        else:
+            cushion_pct = 0.04  # 4%
+
+        safety_cushion = liquidation_price * cushion_pct
+
+        logger.info(f"🛡️ 强平价安全垫计算:")
+        logger.info(f"  杠杆倍数: {leverage}x")
+        logger.info(f"  安全垫比例: {cushion_pct:.1%}")
+        logger.info(f"  安全垫金额: ${safety_cushion:.2f} ({safety_cushion/liquidation_price*100:.2f}% 强平价)")
+
+        return safety_cushion
+
+    def validate_stop_loss_safety(
+        self,
+        stop_loss_price: float,
+        liquidation_price: float,
+        entry_price: float,
+        side: Side
+    ) -> Tuple[bool, str]:
+        """
+        v5.4: 验证止损价的安全性
+
+        确保止损价与强平价之间有足够的安全距离：
+
+        验证规则：
+        1. 止损价必须在强平价的安全侧（LONG更高，SHORT更低）
+        2. 止损价与强平价的距离 ≥ 强平价的 2%
+        3. 止损价与入场价的距离合理（不超过 15%）
+
+        Args:
+            stop_loss_price: 止损价格
+            liquidation_price: 强平价格
+            entry_price: 入场价格
+            side: 交易方向
+
+        Returns:
+            (是否安全, 验证信息)
+        """
+        # 计算止损价与强平价的距离
+        buffer_amount = abs(stop_loss_price - liquidation_price)
+        buffer_pct = buffer_amount / liquidation_price * 100
+
+        # 最小安全距离：强平价的 2%
+        min_buffer_pct = 2.0
+
+        # 检查止损价方向
+        if side == Side.LONG:
+            # LONG: 止损价应该高于强平价
+            if stop_loss_price <= liquidation_price:
+                return False, f"❌ 危险：LONG止损价(${stop_loss_price:.2f}) ≤ 强平价(${liquidation_price:.2f})，会直接爆仓！"
+        else:
+            # SHORT: 止损价应该低于强平价
+            if stop_loss_price >= liquidation_price:
+                return False, f"❌ 危险：SHORT止损价(${stop_loss_price:.2f}) ≥ 强平价(${liquidation_price:.2f})，会直接爆仓！"
+
+        # 检查安全距离
+        if buffer_pct < min_buffer_pct:
+            return False, f"⚠️ 警告：止损距强平仅 {buffer_pct:.2f}% < {min_buffer_pct}%，建议增加安全垫"
+
+        # 计算止损距离入场价的百分比
+        stop_distance_pct = abs(stop_loss_price - entry_price) / entry_price * 100
+
+        # 检查止损距离是否过大（超过 15% 可能过于保守）
+        if stop_distance_pct > 15:
+            return False, f"⚠️ 注意：止损距入场 {stop_distance_pct:.1f}%，可能过于保守"
+
+        # 全部通过
+        return True, (
+            f"✅ 止损价安全验证通过：\n"
+            f"  止损价: ${stop_loss_price:.2f}\n"
+            f"  强平价: ${liquidation_price:.2f}\n"
+            f"  安全距离: {buffer_pct:.2f}% (${buffer_amount:.2f})\n"
+            f"  止损距离: {stop_distance_pct:.1f}%"
+        )
+
     def calculate_sniper_position(
         self,
         symbol: str,
@@ -253,16 +358,22 @@ class SniperPositionManager:
         # 计算动态波动率安全垫
         volatility_buffer = self.calculate_volatility_buffer(symbol, entry_price)
 
-        # 止损价 = 强平价 ± 动态安全垫
+        # v5.4: 计算强平价安全垫（防止止损过于接近强平）
+        safety_cushion = self.calculate_safety_cushion(liquidation_price, leverage)
+
+        # 止损价 = 强平价 ± max(动态安全垫, 强平价安全垫)
+        # 使用更大的安全垫确保主动止损优先于强平
+        total_buffer = max(volatility_buffer, safety_cushion)
+
         if side == Side.LONG:
-            # LONG: 止损价 = 强平价 + 动态安全垫（避免被强平）
-            stop_loss_price = liquidation_price + volatility_buffer
+            # LONG: 止损价 = 强平价 + 总安全垫（避免被强平）
+            stop_loss_price = liquidation_price + total_buffer
             # 目标止盈（1:5 盈亏比）
             stop_distance = (entry_price - stop_loss_price) / entry_price
             take_profit_price = entry_price * (1 + abs(stop_distance) * self.target_rr_ratio)
         else:
-            # SHORT: 止损价 = 强平价 - 动态安全垫（避免被强平）
-            stop_loss_price = liquidation_price - volatility_buffer
+            # SHORT: 止损价 = 强平价 - 总安全垫（避免被强平）
+            stop_loss_price = liquidation_price - total_buffer
             # 目标止盈（1:5 盈亏比）
             stop_distance = (stop_loss_price - entry_price) / entry_price
             take_profit_price = entry_price * (1 - abs(stop_distance) * self.target_rr_ratio)
@@ -279,6 +390,20 @@ class SniperPositionManager:
             entry_time=datetime.now(),
         )
 
+        # v5.4: 验证止损价安全性
+        is_safe, safety_msg = self.validate_stop_loss_safety(
+            stop_loss_price, liquidation_price, entry_price, side
+        )
+        if not is_safe:
+            logger.error(f"❌ 止损价安全验证失败: {safety_msg}")
+            # 根据严重程度决定是否继续
+            if "危险" in safety_msg:
+                # 危险情况：直接拒绝开仓
+                return None
+            # 警告情况：继续但记录警告
+        else:
+            logger.info(f"✅ {safety_msg}")
+
         # 验证订单
         valid, reason = self.exchange_info.validate_order(symbol, quantity, entry_price)
         if not valid:
@@ -286,7 +411,7 @@ class SniperPositionManager:
             return None
 
         # 打印仓位信息
-        self._print_position_summary(position, capital, liquidation_price, volatility_buffer)
+        self._print_position_summary(position, capital, liquidation_price, volatility_buffer, safety_cushion, total_buffer)
 
         return position
 
@@ -295,14 +420,19 @@ class SniperPositionManager:
         position: SniperPosition,
         capital: float,
         liquidation_price: float,
-        volatility_buffer: float
+        volatility_buffer: float,
+        safety_cushion: float,
+        total_buffer: float
     ) -> None:
         """打印仓位摘要"""
         notional = position.quantity * position.entry_price
         margin_used = notional / position.leverage
 
+        # 计算止损价与强平价的距离百分比
+        stop_loss_distance_pct = abs(position.stop_loss_price - liquidation_price) / liquidation_price * 100
+
         logger.info(f"\n{'='*60}")
-        logger.info(f"🎯 v5.3 狙击手仓位计算结果")
+        logger.info(f"🎯 v5.4 狙击手仓位计算结果（增强安全垫）")
         logger.info(f"{'='*60}")
         logger.info(f"交易对: {position.symbol}")
         logger.info(f"方向: {position.side.value}")
@@ -315,10 +445,15 @@ class SniperPositionManager:
         logger.info(f"⚠️ 动态强平价计算:")
         logger.info(f"  真实强平价: ${liquidation_price:.2f} (基于 MMR)")
         logger.info(f"  强平距离: {abs(liquidation_price/position.entry_price - 1)*100:.2f}%")
-        logger.info(f"  动态安全垫: ${volatility_buffer:.2f} ({volatility_buffer/position.entry_price*100:.3f}%)")
         logger.info(f"")
-        logger.info(f"🛡️ 主动止损线（动态缓冲）:")
+        logger.info(f"🛡️ 多层安全垫系统:")
+        logger.info(f"  波动率缓冲: ${volatility_buffer:.2f} ({volatility_buffer/position.entry_price*100:.3f}%)")
+        logger.info(f"  强平价安全垫: ${safety_cushion:.2f} ({safety_cushion/liquidation_price*100:.2f}% 强平价)")
+        logger.info(f"  总安全垫: ${total_buffer:.2f} (max of above)")
+        logger.info(f"")
+        logger.info(f"🛡️ 主动止损线（多层安全垫）:")
         logger.info(f"  止损价: ${position.stop_loss_price:.2f} ({abs(position.stop_loss_price/position.entry_price - 1)*100:.2f}%)")
+        logger.info(f"  距离强平价: {stop_loss_distance_pct:.2f}% (${abs(position.stop_loss_price - liquidation_price):.2f})")
         logger.info(f"  💡 宁可自己止损，绝不让交易所强平！")
         logger.info(f"")
         logger.info(f"🎯 目标止盈: ${position.take_profit_price:.2f} ({abs(position.take_profit_price/position.entry_price - 1)*100:.2f}%)")

@@ -43,6 +43,10 @@ ENV/
 logs/
 *.log
 
+# State persistence (trading data, positions, etc.)
+state/
+state/*.json
+
 # OS
 .DS_Store
 Thumbs.db

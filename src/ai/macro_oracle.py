@@ -82,11 +82,16 @@ class MacroOracle:
             content = response.content[0].text
             result = self._parse_response(content)
 
+            # P1-7: 验证 trading_bans 类型，只接受 'LONG' 和 'SHORT'
+            valid_bans = {'LONG', 'SHORT'}
+            trading_bans = result.get('trading_bans', [])
+            trading_bans = [b.upper() for b in trading_bans if b.upper() in valid_bans]
+
             # 创建 MacroState
             macro_state = MacroState(
                 global_sentiment=result.get('global_sentiment', 'neutral'),
                 dominant_narrative=result.get('dominant_narrative', ''),
-                trading_bans=result.get('trading_bans', []),
+                trading_bans=trading_bans,
                 recommended_stance=result.get('recommended_stance', 'neutral'),
                 reasoning=result.get('reasoning', ''),
                 timestamp=datetime.now()

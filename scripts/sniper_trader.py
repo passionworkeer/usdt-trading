@@ -18,9 +18,10 @@ import asyncio
 import logging
 import os
 import sys
+import json
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Any
 from enum import Enum
 
 # 添加项目根目录到路径
@@ -38,6 +39,19 @@ from src.exchange.sniper_position_manager import (
 from src.quantitative.mtf_resonance_lock import MTFResonanceLock, MTFSignal
 from src.utils.webhook_alerter import WebhookAlerter, get_alerter
 from src.utils.api_retry import exponential_backoff_retry, classify_binance_error
+# P1-17: 健康检查和熔断器
+from src.utils.health_checker import ExchangeHealthChecker, HealthStatus
+from src.utils.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerManager,
+    CircuitBreakerOpenError,
+    CircuitBreakerConfig
+)
+from src.utils.degradation_strategy import (
+    DegradationStrategy,
+    DegradationLevel,
+    EmergencyHandler
+)
 
 
 def validate_config() -> None:
@@ -179,8 +193,6 @@ class SniperTrader:
                 threshold_pct=0.5,
                 timeout_sec=5.0
             )
-            self.macro_state = None
-            self.last_macro_update = None
             logger.info("🤖 AI Agent 组件已启动")
         else:
             self.decision_engine = None
@@ -188,8 +200,6 @@ class SniperTrader:
             self.scraper = None
             self.macro_oracle = None
             self.slippage_guard = None
-            self.macro_state = None
-            self.last_macro_update = None
 
         # 监控的交易对
         self.watch_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
@@ -201,6 +211,36 @@ class SniperTrader:
         self.pending_orders: Dict[str, Dict] = {}
         self._pending_lock = asyncio.Lock()  # 并发锁
 
+        # P1-17: 初始化健康检查器和熔断器
+        self.health_checker = ExchangeHealthChecker(self.exchange_info.exchange)
+        self.circuit_breaker_manager = CircuitBreakerManager()
+
+        # 创建交易熔断器（3次失败后触发，冷却5分钟）
+        self.trading_breaker = self.circuit_breaker_manager.create_breaker(
+            name="trading",
+            config=CircuitBreakerConfig(
+                failure_threshold=3,
+                success_threshold=2,
+                cooldown_seconds=300,  # 5分钟
+            )
+        )
+
+        # 创建订单簿熔断器
+        self.orderbook_breaker = self.circuit_breaker_manager.create_breaker(
+            name="orderbook",
+            config=CircuitBreakerConfig(
+                failure_threshold=5,
+                success_threshold=3,
+                cooldown_seconds=60,  # 1分钟
+            )
+        )
+
+        # P1-17: 初始化降级策略
+        self.degradation_strategy = DegradationStrategy()
+        self.emergency_handler = EmergencyHandler(self.position_manager, self.alerter)
+
+        logger.info("🛡️ P1-17: 健康检查器、熔断器和降级策略已初始化")
+
         # 初始化状态广播器（进程间通信，非阻塞）
         self.state_broadcaster = None
 
@@ -211,6 +251,9 @@ class SniperTrader:
 
         # 打印配置
         self._print_config()
+
+        # P1-14: 尝试从崩溃恢复
+        self.load_state()
 
     def _print_config(self) -> None:
         """打印配置信息"""
@@ -229,12 +272,298 @@ class SniperTrader:
             logger.info(f"  状态广播: Redis Pub/Sub（独立进程监控）")
         logger.info(f"{'='*60}\n")
 
-    @exponential_backoff_retry(max_retries=3, base_delay=2.0)
+    # ==================== P1-14: 状态持久化和崩溃恢复 ====================
+
+    # 状态文件路径
+    STATE_FILE = Path('state/sniper_state.json')
+    STATE_VERSION = 1  # 状态文件版本号，用于兼容性检查
+
+    def save_state(self) -> None:
+        """
+        P1-14: 保存交易状态到磁盘
+
+        持久化内容：
+        - positions: 当前持仓信息
+        - closed_positions: 已平仓历史（用于统计）
+        - pending_orders: 挂单信息
+        - trade_count: 交易次数
+        - daily_pnl: 当日盈亏
+        - last_update: 最后更新时间
+
+        调用时机：
+        - 开仓后
+        - 平仓后
+        - 挂单创建/撤销后
+        - 主循环每次迭代结束
+        """
+        try:
+            # 确保 state 目录存在
+            self.STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+            # 序列化持仓信息
+            positions_data = []
+            for symbol, pos in self.position_manager.positions.items():
+                pos_dict = {
+                    'symbol': pos.symbol,
+                    'side': pos.side.value,
+                    'entry_price': pos.entry_price,
+                    'quantity': pos.quantity,
+                    'leverage': pos.leverage,
+                    'stop_loss_price': pos.stop_loss_price,
+                    'take_profit_price': pos.take_profit_price,
+                    'trailing_stop_price': pos.trailing_stop_price,
+                    'entry_time': pos.entry_time.isoformat() if pos.entry_time else None,
+                    'pnl': pos.pnl,
+                    'status': pos.status.value if hasattr(pos.status, 'value') else str(pos.status),
+                }
+                positions_data.append(pos_dict)
+
+            # 序列化已平仓历史（最多保留最近 100 条）
+            closed_positions_data = []
+            for pos in self.position_manager.closed_positions[-100:]:
+                pos_dict = {
+                    'symbol': pos.symbol,
+                    'side': pos.side.value,
+                    'entry_price': pos.entry_price,
+                    'quantity': pos.quantity,
+                    'leverage': pos.leverage,
+                    'stop_loss_price': pos.stop_loss_price,
+                    'take_profit_price': pos.take_profit_price,
+                    'trailing_stop_price': pos.trailing_stop_price,
+                    'entry_time': pos.entry_time.isoformat() if pos.entry_time else None,
+                    'pnl': pos.pnl,
+                    'status': pos.status.value if hasattr(pos.status, 'value') else str(pos.status),
+                }
+                closed_positions_data.append(pos_dict)
+
+            # 序列化挂单信息
+            pending_orders_data = []
+            for symbol, order in self.pending_orders.items():
+                signal = order.get('signal')
+                order_dict = {
+                    'symbol': symbol,
+                    'timestamp': order['timestamp'].isoformat(),
+                    'side': order['side'].value,
+                    'vwap': order['vwap'],
+                    'breakthrough_price': order['breakthrough_price'],
+                    # 保存信号的关键信息（不保存整个对象）
+                    'signal_confidence': getattr(signal, 'confidence', 0),
+                    'signal_locked': getattr(signal, 'is_locked', False),
+                }
+                pending_orders_data.append(order_dict)
+
+            # 获取交易统计
+            stats = self.position_manager.get_trading_statistics()
+
+            # 构建完整状态
+            state = {
+                'version': self.STATE_VERSION,
+                'positions': positions_data,
+                'closed_positions': closed_positions_data,
+                'pending_orders': pending_orders_data,
+                'trade_count': stats['total_trades'],
+                'daily_pnl': stats['total_pnl'],
+                'last_update': datetime.now().isoformat(),
+                'config': {
+                    'capital': self.capital,
+                    'testnet': self.testnet,
+                    'dry_run': self.dry_run,
+                }
+            }
+
+            # 原子写入：先写临时文件，再重命名
+            temp_file = self.STATE_FILE.with_suffix('.tmp')
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2, ensure_ascii=False)
+
+            # 重命名临时文件为正式文件
+            temp_file.replace(self.STATE_FILE)
+
+            logger.debug(f"💾 状态已保存: {len(positions_data)} 持仓, {len(pending_orders_data)} 挂单")
+
+        except Exception as e:
+            logger.error(f"❌ 状态保存失败: {e}", exc_info=True)
+
+    def load_state(self) -> bool:
+        """
+        P1-14: 从磁盘加载交易状态（崩溃恢复）
+
+        Returns:
+            是否成功加载状态
+        """
+        try:
+            if not self.STATE_FILE.exists():
+                logger.info("📂 未找到状态文件，从头开始")
+                return False
+
+            with open(self.STATE_FILE, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+
+            # 版本兼容性检查
+            if state.get('version', 0) != self.STATE_VERSION:
+                logger.warning(
+                    f"⚠️ 状态文件版本不匹配（文件: {state.get('version')}, 当前: {self.STATE_VERSION}），"
+                    f"跳过恢复"
+                )
+                return False
+
+            # 配置一致性检查
+            saved_config = state.get('config', {})
+            if saved_config.get('capital') != self.capital:
+                logger.warning(
+                    f"⚠️ 资金配置已变更（保存: {saved_config.get('capital')}, 当前: {self.capital}），"
+                    f"跳过恢复"
+                )
+                return False
+
+            last_update = state.get('last_update', 'Unknown')
+            logger.info(f"📂 发现状态文件，最后更新: {last_update}")
+
+            # 恢复持仓
+            positions_data = state.get('positions', [])
+            restored_positions = 0
+            for pos_dict in positions_data:
+                try:
+                    from src.exchange.sniper_position_manager import (
+                        SniperPosition, Side, PositionStatus
+                    )
+
+                    # 重建 SniperPosition 对象
+                    position = SniperPosition(
+                        symbol=pos_dict['symbol'],
+                        side=Side(pos_dict['side']),
+                        entry_price=pos_dict['entry_price'],
+                        quantity=pos_dict['quantity'],
+                        leverage=pos_dict['leverage'],
+                        stop_loss_price=pos_dict['stop_loss_price'],
+                        take_profit_price=pos_dict['take_profit_price'],
+                        trailing_stop_price=pos_dict.get('trailing_stop_price'),
+                        entry_time=datetime.fromisoformat(pos_dict['entry_time']) if pos_dict.get('entry_time') else datetime.now(),
+                        pnl=pos_dict.get('pnl', 0),
+                        status=PositionStatus(pos_dict.get('status', 'OPEN')),
+                    )
+
+                    # 添加到仓位管理器
+                    self.position_manager.positions[position.symbol] = position
+                    restored_positions += 1
+
+                except Exception as e:
+                    logger.error(f"恢复持仓失败: {pos_dict.get('symbol')} - {e}")
+                    continue
+
+            if restored_positions > 0:
+                logger.info(f"✅ 恢复 {restored_positions} 个持仓")
+
+            # 恢复已平仓历史
+            closed_positions_data = state.get('closed_positions', [])
+            restored_closed = 0
+            for pos_dict in closed_positions_data:
+                try:
+                    from src.exchange.sniper_position_manager import (
+                        SniperPosition, Side, PositionStatus
+                    )
+
+                    position = SniperPosition(
+                        symbol=pos_dict['symbol'],
+                        side=Side(pos_dict['side']),
+                        entry_price=pos_dict['entry_price'],
+                        quantity=pos_dict['quantity'],
+                        leverage=pos_dict['leverage'],
+                        stop_loss_price=pos_dict['stop_loss_price'],
+                        take_profit_price=pos_dict['take_profit_price'],
+                        trailing_stop_price=pos_dict.get('trailing_stop_price'),
+                        entry_time=datetime.fromisoformat(pos_dict['entry_time']) if pos_dict.get('entry_time') else datetime.now(),
+                        pnl=pos_dict.get('pnl', 0),
+                        status=PositionStatus(pos_dict.get('status', 'CLOSED')),
+                    )
+
+                    self.position_manager.closed_positions.append(position)
+                    restored_closed += 1
+
+                except Exception as e:
+                    logger.error(f"恢复历史持仓失败: {pos_dict.get('symbol')} - {e}")
+                    continue
+
+            if restored_closed > 0:
+                logger.info(f"✅ 恢复 {restored_closed} 条历史记录")
+
+            # 恢复挂单（注意：挂单有时间限制，需要检查是否过期）
+            pending_orders_data = state.get('pending_orders', [])
+            restored_orders = 0
+            expired_orders = 0
+            for order_dict in pending_orders_data:
+                try:
+                    order_time = datetime.fromisoformat(order_dict['timestamp'])
+                    holding_duration = datetime.now() - order_time
+                    holding_minutes = holding_duration.total_seconds() / 60
+
+                    # 检查是否超时（超过 1 小时的挂单不再恢复）
+                    if holding_minutes > 60:
+                        logger.warning(
+                            f"⏰ 挂单 {order_dict['symbol']} 已超时 "
+                            f"({holding_minutes:.0f} 分钟)，跳过恢复"
+                        )
+                        expired_orders += 1
+                        continue
+
+                    # 重建 MTFSignal 对象（简化版，只保留必要信息）
+                    from src.quantitative.mtf_resonance_lock import MTFSignal
+                    signal = MTFSignal(
+                        signal=1 if order_dict['side'] == 'LONG' else -1,
+                        confidence=order_dict.get('signal_confidence', 0.8),
+                        reasons=['从崩溃恢复'],
+                        is_locked=order_dict.get('signal_locked', True),
+                        wait_for_pullback=True,
+                        suggested_entry_price=order_dict['vwap'],
+                        breakthrough_price=order_dict['breakthrough_price'],
+                    )
+
+                    # 恢复挂单
+                    self.pending_orders[order_dict['symbol']] = {
+                        'signal': signal,
+                        'timestamp': order_time,
+                        'side': Side(order_dict['side']),
+                        'vwap': order_dict['vwap'],
+                        'breakthrough_price': order_dict['breakthrough_price'],
+                    }
+                    restored_orders += 1
+
+                except Exception as e:
+                    logger.error(f"恢复挂单失败: {order_dict.get('symbol')} - {e}")
+                    continue
+
+            if restored_orders > 0:
+                logger.info(f"✅ 恢复 {restored_orders} 个挂单")
+            if expired_orders > 0:
+                logger.info(f"⏰ {expired_orders} 个挂单已过期，跳过恢复")
+
+            # 打印恢复摘要
+            stats = self.position_manager.get_trading_statistics()
+            logger.info(f"\n{'='*60}")
+            logger.info(f"🔄 崩溃恢复完成")
+            logger.info(f"{'='*60}")
+            logger.info(f"  持仓: {restored_positions}")
+            logger.info(f"  历史: {restored_closed}")
+            logger.info(f"  挂单: {restored_orders} (过期: {expired_orders})")
+            logger.info(f"  交易次数: {stats['total_trades']}")
+            logger.info(f"  总盈亏: ${stats['total_pnl']:+.2f}")
+            logger.info(f"{'='*60}\n")
+
+            return True
+
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ 状态文件解析失败: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"❌ 状态加载失败: {e}", exc_info=True)
+            return False
+
     async def check_and_trade(self, symbol: str) -> Optional[str]:
         """
         检查并执行交易（v8.0 AI Agent + 订单生命周期 + 动量代偿 + Dry-Run）
 
         流程：
+        0. P1-17: 健康检查和熔断器检查
         1. MTF 三重共振检查
         2. 如果锁定，发送预警
         3. v8.0: AI Agent 宏观禁令检查
@@ -252,6 +581,48 @@ class SniperTrader:
         Returns:
             交易结果消息
         """
+        # P1-17: 0. 健康检查和熔断器检查
+        health_result = await self.health_checker.health_check()
+
+        # 记录健康状态
+        if self.state_broadcaster:
+            await self.state_broadcaster.broadcast_health(
+                self.health_checker.get_status_summary()
+            )
+
+        # 检查是否健康
+        if not health_result.is_healthy():
+            status_emoji = {
+                HealthStatus.UNHEALTHY: "❌",
+                HealthStatus.CRITICAL: "🚨",
+            }.get(health_result.status, "⚠️")
+
+            logger.warning(
+                f"{status_emoji} 交易所不健康 ({health_result.status.value})，跳过交易机会"
+            )
+
+            # 发送健康检查失败预警
+            await self.alerter.alert_system_warning(
+                title=f"交易所不健康 ({health_result.status.value})",
+                message=f"跳过 {symbol} 交易机会\n错误: {', '.join(health_result.errors)}"
+            )
+
+            return f"⚠️ 交易所不健康，跳过交易"
+
+        # P1-17: 检查交易熔断器
+        if not self.trading_breaker.check():
+            logger.warning(
+                f"🚫 交易熔断器开启，跳过 {symbol} 交易机会"
+            )
+
+            # 发送熔断器预警
+            await self.alerter.alert_system_warning(
+                title="交易熔断器已触发",
+                message=f"连续失败 {self.trading_breaker.failure_count} 次，冷却期中"
+            )
+
+            return "🚫 交易熔断器已触发"
+
         # 1. MTF 三重共振检查
         signal = await self.mtf_lock.check_triple_resonance(symbol)
 
@@ -314,6 +685,9 @@ class SniperTrader:
                     'breakthrough_price': signal.breakthrough_price,
                 }
 
+            # P1-14: 保存状态（挂单创建）
+            self.save_state()
+
             logger.info(f"📝 {symbol} 挂单等待回踩 VWAP ${signal.suggested_entry_price:.2f}")
 
             return f"📝 挂单等待 {symbol} 回踩 VWAP ${signal.suggested_entry_price:.2f}"
@@ -333,13 +707,18 @@ class SniperTrader:
 
         # 11. v8.0: 滑点检查（AI 思考期间价格是否偏离）
         if self.enable_ai_agent:
-            latest_price = self.exchange_info.exchange.fetch_ticker(symbol)['last']
-            passed, slippage_reason = self.slippage_guard.check_slippage(
-                symbol, latest_price
-            )
-            if not passed:
-                logger.warning(f"🚨 {slippage_reason}")
-                return f"🚨 {slippage_reason}"
+            try:
+                latest_price = self.exchange_info.exchange.fetch_ticker(symbol)['last']
+                passed, slippage_reason = self.slippage_guard.check_slippage(
+                    symbol, latest_price
+                )
+                if not passed:
+                    logger.warning(f"🚨 {slippage_reason}")
+                    return f"🚨 {slippage_reason}"
+            except Exception as e:
+                error_msg = f"❌ P1-8: 滑点检查失败 - 无法获取 {symbol} 当前价格: {e}"
+                logger.error(error_msg)
+                return error_msg
 
         # 12. 执行开仓（或模拟）
         return await self._execute_open_position(position, current_price, "MARKET")
@@ -376,6 +755,9 @@ class SniperTrader:
             # 模拟开仓（不实际调用 API）
             self.position_manager.open_position(position)
 
+            # P1-14: 保存状态
+            self.save_state()
+
             # 异步广播开仓事件（非阻塞）
             if self.state_broadcaster:
                 await self.state_broadcaster.broadcast_event({
@@ -393,31 +775,53 @@ class SniperTrader:
 
         # P0-1 修复：实现真实下单逻辑
         try:
+            # P1-17: 熔断器保护的 API 调用
+            if not self.trading_breaker.check():
+                error_msg = f"🚫 交易熔断器开启，拒绝下单 {symbol}"
+                logger.error(error_msg)
+
+                # 发送预警
+                await self.alerter.alert_system_warning(
+                    title="交易被熔断器拦截",
+                    message=f"{symbol} {side_str}\n连续失败 {self.trading_breaker.failure_count} 次"
+                )
+
+                return error_msg
+
             # 1. 调用 Binance API 下单
             side = 'buy' if signal.signal == 1 else 'sell'
 
-            if fill_type == 'market':
-                # 市价单
-                order = self.exchange_info.exchange.create_market_order(
-                    symbol=symbol,
-                    side=side,
-                    amount=position.quantity,
-                    params={
-                        'leverage': position.leverage,
-                    }
-                )
-            else:
-                # 限价单
-                order = self.exchange_info.exchange.create_limit_order(
-                    symbol=symbol,
-                    side=side,
-                    amount=position.quantity,
-                    price=execution_price,
-                    params={
-                        'leverage': position.leverage,
-                        'timeInForce': 'GTC',  # Good Till Cancel
-                    }
-                )
+            try:
+                if fill_type == 'market':
+                    # 市价单
+                    order = self.exchange_info.exchange.create_market_order(
+                        symbol=symbol,
+                        side=side,
+                        amount=position.quantity,
+                        params={
+                            'leverage': position.leverage,
+                        }
+                    )
+                else:
+                    # 限价单
+                    order = self.exchange_info.exchange.create_limit_order(
+                        symbol=symbol,
+                        side=side,
+                        amount=position.quantity,
+                        price=execution_price,
+                        params={
+                            'leverage': position.leverage,
+                            'timeInForce': 'GTC',  # Good Till Cancel
+                        }
+                    )
+
+                # P1-17: 订单成功，记录熔断器成功
+                self.trading_breaker.on_success()
+
+            except Exception as api_error:
+                # P1-17: API 调用失败，记录熔断器失败
+                self.trading_breaker.on_failure()
+                raise api_error
 
             # 2. 验证订单是否成功
             if not order or order.get('status') not in ['filled', 'open']:
@@ -438,6 +842,9 @@ class SniperTrader:
 
             # 4. 记录到仓位管理器
             self.position_manager.open_position(position)
+
+            # P1-14: 保存状态
+            self.save_state()
 
         except Exception as e:
             error_msg = f"❌ 实盘下单异常：{e}"
@@ -514,6 +921,8 @@ class SniperTrader:
                 async with self._pending_lock:
                     if symbol in self.pending_orders:
                         del self.pending_orders[symbol]
+                # P1-14: 保存状态（挂单超时撤销）
+                self.save_state()
                 logger.warning(f"⏰ {symbol} 挂单超时 1 小时，已撤销")
                 continue
 
@@ -535,6 +944,8 @@ class SniperTrader:
                         async with self._pending_lock:
                             if symbol in self.pending_orders:
                                 del self.pending_orders[symbol]
+                        # P1-14: 保存状态（动量代偿成交）
+                        self.save_state()
                         continue
 
                 elif side == Side.SHORT and current_price < breakthrough_price:
@@ -553,6 +964,8 @@ class SniperTrader:
                         async with self._pending_lock:
                             if symbol in self.pending_orders:
                                 del self.pending_orders[symbol]
+                        # P1-14: 保存状态（动量代偿成交）
+                        self.save_state()
                         continue
 
             # 3. 检查价格回踩（触及 VWAP → 限价成交）
@@ -572,6 +985,8 @@ class SniperTrader:
                     async with self._pending_lock:
                         if symbol in self.pending_orders:
                             del self.pending_orders[symbol]
+                    # P1-14: 保存状态（VWAP 限价成交）
+                    self.save_state()
                     continue
 
             elif side == Side.SHORT and current_price >= vwap:
@@ -590,6 +1005,8 @@ class SniperTrader:
                     async with self._pending_lock:
                         if symbol in self.pending_orders:
                             del self.pending_orders[symbol]
+                    # P1-14: 保存状态（VWAP 限价成交）
+                    self.save_state()
                     continue
 
     async def update_positions(self) -> None:
@@ -622,6 +1039,9 @@ class SniperTrader:
                 if position:
                     self.position_manager.close_position(symbol, exit_price, CloseReason.STOP_LOSS)
 
+                    # P1-14: 保存状态
+                    self.save_state()
+
                     # 发送预警
                     await self.alerter.alert_stop_loss(
                         symbol=symbol,
@@ -645,6 +1065,9 @@ class SniperTrader:
                 closed_position = self.position_manager.close_position(symbol, current_price, close_reason)
 
                 if closed_position:
+                    # P1-14: 保存状态
+                    self.save_state()
+
                     # 异步广播平仓事件（非阻塞）
                     if self.state_broadcaster:
                         await self.state_broadcaster.broadcast_event({
@@ -713,9 +1136,52 @@ class SniperTrader:
 
         check_interval = check_interval_minutes * 60  # 转换为秒
 
+        # P1-17: 健康检查间隔（更频繁的检查）
+        health_check_interval = 60  # 每分钟检查一次
+        last_health_check = 0
+
         while self.running:
             try:
+                current_time = asyncio.get_event_loop().time()
                 logger.info(f"\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} - 开始扫描")
+
+                # P1-17: 定期健康检查
+                if current_time - last_health_check >= health_check_interval:
+                    health_result = await self.health_checker.health_check()
+
+                    # 更新降级策略
+                    degradation_action = self.degradation_strategy.update_strategy(
+                        health_result.status.value
+                    )
+
+                    # 广播健康状态
+                    if self.state_broadcaster:
+                        await self.state_broadcaster.broadcast_health(
+                            self.health_checker.get_status_summary()
+                        )
+
+                    # 如果不健康，发送警告
+                    if not health_result.is_healthy():
+                        await self.alerter.alert_system_warning(
+                            title=f"交易所健康检查: {health_result.status.value}",
+                            message=f"错误: {', '.join(health_result.errors)}\n"
+                                   f"降级策略: {degradation_action.description}"
+                        )
+
+                    # P1-17: 检查是否需要紧急平仓
+                    if self.degradation_strategy.should_emergency_close():
+                        logger.critical("🚨 检测到严重故障，执行紧急平仓策略")
+                        await self.emergency_handler.handle_critical_failure(
+                            reason="交易所严重不健康",
+                            force_close=True
+                        )
+
+                    last_health_check = current_time
+
+                # P1-17: 检查降级策略是否允许开仓
+                if not self.degradation_strategy.can_open_position():
+                    logger.warning("⚠️ 降级策略禁止新开仓，跳过交易扫描")
+                    # 但仍然需要更新持仓和检查挂单
 
                 # 1. 更新仓位
                 await self.update_positions()
@@ -723,14 +1189,19 @@ class SniperTrader:
                 # 2. 检查挂单状态
                 await self.check_pending_orders()
 
-                # 3. 检查是否可以开新仓
-                if len(self.position_manager.positions) < self.position_manager.max_positions:
-                    for symbol in self.watch_symbols:
-                        message = await self.check_and_trade(symbol)
+                # P1-17: 检查降级策略是否允许开仓
+                if not self.degradation_strategy.can_open_position():
+                    logger.warning("⚠️ 降级策略禁止新开仓，跳过交易扫描")
+                    # 但仍然需要更新持仓和检查挂单
+                else:
+                    # 3. 检查是否可以开新仓
+                    if len(self.position_manager.positions) < self.position_manager.max_positions:
+                        for symbol in self.watch_symbols:
+                            message = await self.check_and_trade(symbol)
 
-                        if message:
-                            logger.critical(message)
-                            break  # 最多开一个仓
+                            if message:
+                                logger.critical(message)
+                                break  # 最多开一个仓
 
                 # 4. 打印统计
                 stats = self.position_manager.get_trading_statistics()
@@ -744,6 +1215,9 @@ class SniperTrader:
                 # 打印挂单状态
                 if self.pending_orders:
                     logger.info(f"📝 挂单中: {', '.join(self.pending_orders.keys())}")
+
+                # P1-14: 定期保存状态（每次循环结束）
+                self.save_state()
 
                 logger.info(f"⏰ 下次扫描: {check_interval // 60} 分钟后\n")
 
@@ -762,6 +1236,9 @@ class SniperTrader:
         """清理资源"""
         logger.info("清理资源...")
 
+        # P1-14: 关闭前保存状态
+        self.save_state()
+
         # v8.0: 关闭 Web Scraper
         if self.scraper:
             self.scraper.close()
@@ -778,40 +1255,49 @@ class SniperTrader:
     # ==================== v8.0 AI Agent 辅助方法 ====================
 
     async def _update_macro_state_if_needed(self) -> None:
-        """每小时更新宏观大局观"""
+        """
+        更新宏观大局观（每小时）
+
+        注意：MacroOracle 内部管理缓存和时间检查逻辑，
+        这里只需调用生成方法，无需存储返回值。
+        """
         if not self.macro_oracle:
             return
 
-        # 首次运行或距离上次更新超过 1 小时
-        if self.last_macro_update is None or \
-           (datetime.now() - self.last_macro_update).total_seconds() > 3600:
+        logger.info("🔄 触发宏观大局观更新...")
 
-            logger.info("🔄 更新宏观大局观...")
+        # 抓取外部情报
+        intelligence = {
+            'tweets': await self.scraper.scrape_twitter_sentiment(
+                self.watch_symbols[0].replace('/', ''), limit=50
+            ),
+            'news': await self.scraper.scrape_macro_news(limit=10)
+        }
 
-            # 抓取外部情报
-            intelligence = {
-                'tweets': await self.scraper.scrape_twitter_sentiment(
-                    self.watch_symbols[0].replace('/', ''), limit=50
-                ),
-                'news': await self.scraper.scrape_macro_news(limit=10)
-            }
-
-            # 生成宏观状态
-            self.macro_state = await self.macro_oracle.generate_macro_state(
-                intelligence
-            )
-            self.last_macro_update = datetime.now()
+        # MacroOracle 会检查是否需要更新
+        # 如果距离上次更新不足 1 小时，会返回缓存的值
+        await self.macro_oracle.generate_macro_state(intelligence)
 
     def _check_macro_ban(self, symbol: str, side_str: str) -> bool:
-        """检查宏观禁令"""
-        if not self.macro_state:
+        """
+        检查宏观禁令
+
+        从 MacroOracle 获取缓存的宏观状态（单一数据源）。
+        """
+        if not self.macro_oracle:
+            return True  # AI Agent 未启用，默认允许
+
+        # 从 MacroOracle 获取缓存的宏观状态
+        macro_state = self.macro_oracle.get_cached_state()
+
+        if not macro_state:
             return True  # 没有宏观状态，默认允许
 
         # 检查禁令
-        if side_str.upper() in self.macro_state.trading_bans:
+        if side_str.upper() in macro_state.trading_bans:
             logger.warning(
                 f"🚫 {symbol} {side_str} 被宏观禁令阻止 "
-                f"(原因: {self.macro_state.reasoning})"
+                f"(原因: {macro_state.reasoning})"
             )
             return False
 
@@ -855,10 +1341,12 @@ class SniperTrader:
 
             # 3. 翻译宏观状态
             macro_report = ""
-            if self.macro_state:
-                macro_report = self.translator.translate_macro_state(
-                    self.macro_state.__dict__
-                )
+            if self.macro_oracle:
+                macro_state = self.macro_oracle.get_cached_state()
+                if macro_state:
+                    macro_report = self.translator.translate_macro_state(
+                        macro_state.__dict__
+                    )
 
             # 4. 请求 AI 确认
             logger.info(f"🤖 请求 AI 审批: {symbol}...")

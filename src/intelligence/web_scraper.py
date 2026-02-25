@@ -5,6 +5,7 @@
 """
 import requests
 import logging
+import time
 from typing import List, Dict, Optional
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
@@ -100,10 +101,25 @@ class IntelligenceSniffer:
                 timeout=10
             )
 
+            # 处理 Twitter API 速率限制
             if response.status_code == 429:
-                logger.error("Twitter API 速率限制，请稍后重试")
-                return []
-            elif response.status_code != 200:
+                reset_time = int(response.headers.get('x-rate-limit-reset', time.time() + 60))
+                wait_time = max(0, reset_time - time.time())
+                if wait_time > 0:
+                    logger.warning(f"Twitter API 速率限制，等待 {wait_time:.0f} 秒后重试")
+                    time.sleep(wait_time)
+                    # 重试请求
+                    response = self.session.get(
+                        url,
+                        headers=headers,
+                        params=params,
+                        timeout=10
+                    )
+                else:
+                    logger.error("Twitter API 速率限制，无法获取重置时间")
+                    return []
+
+            if response.status_code != 200:
                 logger.error(f"Twitter API 错误: {response.status_code}")
                 return []
 

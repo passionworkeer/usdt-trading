@@ -9,6 +9,7 @@ v5.0: Binance exchangeInfo 精度处理器
 import logging
 import ccxt
 import os
+import asyncio
 from typing import Dict, Optional, Tuple
 from dataclasses import dataclass
 from dotenv import load_dotenv
@@ -338,6 +339,87 @@ class BinanceExchangeInfo:
     def close(self):
         """关闭连接"""
         pass
+
+    async def health_check(self) -> Dict[str, bool]:
+        """
+        P1-17: 检查交易所服务健康状态
+
+        检查项：
+        1. REST API 可用性
+        2. 交易权限
+        3. 订单簿流动性
+
+        Returns:
+            健康检查结果字典
+        """
+        results = {
+            'rest_api': False,
+            'websocket': False,  # CCXT 不直接支持 WebSocket，此处占位
+            'order_book': False,
+            'trading_allowed': False
+        }
+
+        try:
+            # 1. 测试 REST API
+            try:
+                self.exchange.fetch_ticker('BTC/USDT')
+                results['rest_api'] = True
+                logger.debug("✅ REST API 健康检查通过")
+            except Exception as e:
+                logger.error(f"❌ REST API 健康检查失败: {e}")
+
+            # 2. 测试交易权限
+            try:
+                self.exchange.fetch_balance()
+                results['trading_allowed'] = True
+                logger.debug("✅ 交易权限检查通过")
+            except Exception as e:
+                logger.error(f"❌ 交易权限检查失败: {e}")
+
+            # 3. 测试订单簿
+            try:
+                ob = self.exchange.fetch_order_book('BTC/USDT', limit=5)
+                has_liquidity = len(ob['bids']) > 0 and len(ob['asks']) > 0
+                results['order_book'] = has_liquidity
+                if has_liquidity:
+                    logger.debug("✅ 订单簿流动性检查通过")
+                else:
+                    logger.warning("⚠️ 订单簿流动性不足")
+            except Exception as e:
+                logger.error(f"❌ 订单簿检查失败: {e}")
+
+            # WebSocket 标记为不支持（CCXT 使用 REST API）
+            results['websocket'] = False
+
+        except Exception as e:
+            logger.error(f"❌ 交易所健康检查失败: {e}")
+
+        return results
+
+    def is_healthy(self) -> bool:
+        """
+        快速检查交易所是否健康
+
+        Returns:
+            True: 健康且允许交易
+            False: 不健康或无法交易
+        """
+        # 关键检查：REST API 和交易权限必须正常
+        try:
+            # 快速检查：获取服务器时间
+            if hasattr(self.exchange, 'fetch_time'):
+                self.exchange.fetch_time()
+            else:
+                # fallback: 获取 ticker
+                self.exchange.fetch_ticker('BTC/USDT')
+
+            # 检查交易权限
+            self.exchange.fetch_balance()
+
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ 交易所健康检查失败: {e}")
+            return False
 
 
 if __name__ == '__main__':

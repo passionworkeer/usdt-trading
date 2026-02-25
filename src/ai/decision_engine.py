@@ -104,6 +104,124 @@ Respond ONLY with the JSON, no additional text.
 """
         return prompt
 
+    def _calculate_technical_indicators(self, price_history: List[float],
+                                       market_data: Optional[Dict] = None) -> Dict:
+        """计算技术指标用于降级决策"""
+        indicators = {
+            'trend': 'neutral',
+            'volume_ratio': 1.0,
+            'price_momentum': 0.0,
+            'volatility': None,
+            'rsi': None
+        }
+
+        if len(price_history) >= 30:
+            # 检测趋势
+            indicators['trend'] = TechnicalIndicators.detect_trend(price_history)
+            indicators['rsi'] = TechnicalIndicators.calculate_rsi(price_history)
+            indicators['volatility'] = TechnicalIndicators.calculate_volatility(price_history)
+
+            # 价格动量
+            if len(price_history) >= 5:
+                momentum = (price_history[-1] - price_history[-5]) / price_history[-5] * 100
+                indicators['price_momentum'] = momentum
+
+        # 从市场数据中提取成交量比率
+        if market_data:
+            indicators['volume_ratio'] = market_data.get('volume_ratio', 1.0)
+            # 如果有成交量数据，计算成交量比率
+            if 'volume' in market_data and 'avg_volume' in market_data:
+                if market_data['avg_volume'] > 0:
+                    indicators['volume_ratio'] = market_data['volume'] / market_data['avg_volume']
+
+        return indicators
+
+    def _conservative_fallback(self, symbol: str, price: float,
+                               price_history: List[float],
+                               market_data: Optional[Dict] = None) -> TradingDecision:
+        """
+        AI 失败时的保守技术分析降级方案
+
+        使用保守的技术分析规则，只在趋势明确且放量时才给出交易建议
+        """
+        logger.warning(f"AI 不可用，使用保守技术分析降级方案: {symbol}")
+
+        indicators = self._calculate_technical_indicators(price_history, market_data)
+        trend = indicators['trend']
+        volume_ratio = indicators['volume_ratio']
+        rsi = indicators.get('rsi')
+        volatility = indicators.get('volatility')
+        price_momentum = indicators['price_momentum']
+
+        # 保守决策逻辑
+        # 买入条件：上升趋势 + 放量 + RSI未超买
+        if trend == 'bullish' and volume_ratio > 2.0:
+            # RSI 额外检查
+            if rsi is None or rsi < 70:
+                reasoning_parts = [
+                    'AI 不可用，基于保守技术分析',
+                    f'趋势: {trend}',
+                    f'成交量比率: {volume_ratio:.2f}x (放量)',
+                ]
+                if rsi is not None:
+                    reasoning_parts.append(f'RSI: {rsi:.1f} (未超买)')
+                if volatility is not None:
+                    reasoning_parts.append(f'波动率: {volatility:.2f}')
+
+                return TradingDecision(
+                    action='buy',
+                    confidence=0.5,  # 中等置信度
+                    reasoning=', '.join(reasoning_parts),
+                    risk_level='medium',
+                    stop_loss_pct=-5.0,
+                    take_profit_pct=15.0,
+                    indicators=indicators
+                )
+
+        # 卖出条件：下降趋势 + 放量
+        elif trend == 'bearish' and volume_ratio > 2.0:
+            reasoning_parts = [
+                'AI 不可用，基于保守技术分析',
+                f'趋势: {trend}',
+                f'成交量比率: {volume_ratio:.2f}x (放量)',
+            ]
+            if rsi is not None:
+                reasoning_parts.append(f'RSI: {rsi:.1f}')
+            if price_momentum != 0:
+                reasoning_parts.append(f'价格动量: {price_momentum:+.2f}%')
+
+            return TradingDecision(
+                action='sell',
+                confidence=0.5,
+                reasoning=', '.join(reasoning_parts),
+                risk_level='medium',
+                stop_loss_pct=-5.0,
+                take_profit_pct=15.0,
+                indicators=indicators
+            )
+
+        # 默认持有：市场条件不明确
+        else:
+            reasoning_parts = [
+                'AI 不可用，市场条件不明确，保守持有',
+            ]
+            if trend != 'neutral':
+                reasoning_parts.append(f'趋势: {trend}')
+            if volume_ratio <= 2.0:
+                reasoning_parts.append(f'成交量比率: {volume_ratio:.2f}x (未放量)')
+            else:
+                reasoning_parts.append(f'成交量比率: {volume_ratio:.2f}x')
+            if rsi is not None:
+                reasoning_parts.append(f'RSI: {rsi:.1f}')
+
+            return TradingDecision(
+                action='hold',
+                confidence=0.7,  # 高置信度持币
+                reasoning=', '.join(reasoning_parts),
+                risk_level='low',
+                indicators=indicators
+            )
+
     def analyze_market(self, symbol: str, price: float,
                       price_history: List[float],
                       market_data: Optional[Dict] = None) -> TradingDecision:
@@ -120,13 +238,8 @@ Respond ONLY with the JSON, no additional text.
             交易决策
         """
         if not self.client:
-            logger.warning("Claude 客户端未初始化，返回保守决策")
-            return TradingDecision(
-                action='hold',
-                confidence=0.5,
-                reasoning='AI analysis unavailable - defaulting to hold',
-                risk_level='medium'
-            )
+            logger.warning("Claude 客户端未初始化，使用保守技术分析降级方案")
+            return self._conservative_fallback(symbol, price, price_history, market_data)
 
         try:
             prompt = self._build_analysis_prompt(symbol, price, price_history, market_data)
@@ -173,20 +286,11 @@ Respond ONLY with the JSON, no additional text.
 
         except json.JSONDecodeError as e:
             logger.error(f"解析 Claude 响应失败: {e}")
-            return TradingDecision(
-                action='hold',
-                confidence=0.3,
-                reasoning='Failed to parse AI response',
-                risk_level='high'
-            )
+            logger.error(f"原始响应内容: {content[:500] if 'content' in locals() else 'N/A'}")
+            return self._conservative_fallback(symbol, price, price_history, market_data)
         except Exception as e:
             logger.error(f"Claude API 调用失败: {e}")
-            return TradingDecision(
-                action='hold',
-                confidence=0.3,
-                reasoning=f'AI analysis failed: {str(e)}',
-                risk_level='high'
-            )
+            return self._conservative_fallback(symbol, price, price_history, market_data)
 
     def should_execute_trade(self, decision: TradingDecision,
                             min_confidence: float = 0.7) -> bool:
