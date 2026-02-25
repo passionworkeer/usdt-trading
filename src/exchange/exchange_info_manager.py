@@ -224,22 +224,28 @@ class BinanceExchangeInfo:
         ticker = self.exchange.fetch_ticker(symbol)
         current_price = ticker['last']
 
+        # P0-3 修复：删除自动杠杆提升逻辑，添加硬杠杆上限
+        MAX_ALLOWED_LEVERAGE = 5  # 硬杠杆上限，可从配置读取
+
+        # 如果请求的杠杆超过上限，降低到上限
+        if leverage > MAX_ALLOWED_LEVERAGE:
+            logger.warning(f"⚠️ 请求杠杆 {leverage}x 超过安全上限 {MAX_ALLOWED_LEVERAGE}x，已自动降低")
+            leverage = MAX_ALLOWED_LEVERAGE
+
         # 计算最大可用名义价值
         max_notional = capital * leverage
 
         # 检查：最大名义价值是否满足 MIN_NOTIONAL
         if max_notional < info.min_notional:
-            # 尝试提高杠杆
-            while leverage < info.max_leverage:
-                leverage += 5
-                max_notional = capital * leverage
-                if max_notional >= info.min_notional:
-                    break
-
-            # 如果达到最大杠杆仍不足
-            if max_notional < info.min_notional:
-                logger.error(f"❌ 资金不足！${capital:.2f} 即使 {info.max_leverage}x 杠杆也无法满足 MIN_NOTIONAL ${info.min_notional:.2f}")
-                return 0, 0, False
+            # P0-3: 不再自动提高杠杆，直接拒绝交易
+            logger.error(
+                f"❌ 资金不足！${capital:.2f} 使用 {leverage}x 杠杆无法满足 MIN_NOTIONAL ${info.min_notional:.2f}"
+            )
+            logger.error(
+                f"💡 建议：1) 增加资金至 ${info.min_notional / leverage:.2f}+"
+                f" 2) 选择最小名义价值更低的交易对"
+            )
+            return 0, 0, False
 
         # 计算数量（向下取整到 step_size）
         quantity = max_notional / current_price

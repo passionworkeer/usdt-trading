@@ -38,6 +38,40 @@ from src.exchange.sniper_position_manager import (
 from src.quantitative.mtf_resonance_lock import MTFResonanceLock, MTFSignal
 from src.utils.webhook_alerter import WebhookAlerter, get_alerter
 from src.utils.api_retry import exponential_backoff_retry, classify_binance_error
+
+
+def validate_config() -> None:
+    """
+    P0-4 修复：启动时验证必需的配置项
+
+    Raises:
+        RuntimeError: 缺少必需的环境变量时抛出
+    """
+    errors = []
+
+    # 必需的 Binance API 配置
+    required_configs = {
+        'BINANCE_API_KEY': os.getenv('BINANCE_API_KEY'),
+        'BINANCE_API_SECRET': os.getenv('BINANCE_API_SECRET'),
+    }
+
+    # 检查必需配置
+    for key, value in required_configs.items():
+        if not value or value == f'your_{key.lower()}':
+            errors.append(f"❌ 缺少必需的配置: {key}")
+
+    # 检查 AI Agent 配置（如果启用）
+    if os.getenv('ENABLE_AI_AGENT', 'false').lower() == 'true':
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if not api_key or api_key == 'your_anthropic_api_key':
+            errors.append("❌ ENABLE_AI_AGENT=true 但缺少 ANTHROPIC_API_KEY")
+
+    # 如果有错误，抛出异常
+    if errors:
+        error_msg = "\n".join(errors) + "\n\n请检查 .env 文件配置！"
+        raise RuntimeError(error_msg)
+
+    logger.info("✅ 配置验证通过")
 from src.monitoring.state_broadcaster import StateBroadcaster
 
 # v8.0 AI Agent 组件
@@ -102,6 +136,9 @@ class SniperTrader:
             enable_broadcaster: 是否启用状态广播（Redis Pub/Sub）
             enable_ai_agent: 是否启用 AI Agent（v8.0）
         """
+        # P0-4: 配置验证（最先执行）
+        validate_config()
+
         self.testnet = testnet
         self.dry_run = dry_run
         self.capital = capital
@@ -119,6 +156,20 @@ class SniperTrader:
         if self.enable_ai_agent:
             logger.info("初始化 AI Agent 组件...")
             self.decision_engine = ClaudeDecisionEngine()
+
+            # P0-4 修复：检查 AI 客户端是否成功初始化
+            if not self.decision_engine.client:
+                raise RuntimeError(
+                    "❌ ENABLE_AI_AGENT=true 但 Claude AI 客户端初始化失败！\n"
+                    "可能原因：\n"
+                    "1. ANTHROPIC_API_KEY 未设置或无效\n"
+                    "2. anthropic 库未安装（运行: pip install anthropic）\n"
+                    "3. API 额度不足\n\n"
+                    "解决方案：\n"
+                    "- 检查 .env 文件中的 ANTHROPIC_API_KEY\n"
+                    "- 或设置 ENABLE_AI_AGENT=false 禁用 AI Agent"
+                )
+
             self.translator = NLTDataTranslator()
             self.scraper = IntelligenceSniffer(
                 twitter_bearer_token=os.getenv('TWITTER_BEARER_TOKEN')
@@ -146,8 +197,9 @@ class SniperTrader:
         # 运行状态
         self.running = True
 
-        # 挂单追踪（订单生命周期管理）
+        # P0-2 修复：挂单追踪 + 并发锁保护
         self.pending_orders: Dict[str, Dict] = {}
+        self._pending_lock = asyncio.Lock()  # 并发锁
 
         # 初始化状态广播器（进程间通信，非阻塞）
         self.state_broadcaster = None
@@ -252,14 +304,15 @@ class SniperTrader:
 
         # 9. 判断是否需要等待回踩
         if signal.wait_for_pullback and signal.suggested_entry_price:
-            # 挂单等待回踩
-            self.pending_orders[symbol] = {
-                'signal': signal,
-                'timestamp': datetime.now(),
-                'side': Side.LONG if signal.signal == 1 else Side.SHORT,
-                'vwap': signal.suggested_entry_price,
-                'breakthrough_price': signal.breakthrough_price,
-            }
+            # P0-2 修复：使用异步锁保护挂单写入
+            async with self._pending_lock:
+                self.pending_orders[symbol] = {
+                    'signal': signal,
+                    'timestamp': datetime.now(),
+                    'side': Side.LONG if signal.signal == 1 else Side.SHORT,
+                    'vwap': signal.suggested_entry_price,
+                    'breakthrough_price': signal.breakthrough_price,
+                }
 
             logger.info(f"📝 {symbol} 挂单等待回踩 VWAP ${signal.suggested_entry_price:.2f}")
 
@@ -338,11 +391,60 @@ class SniperTrader:
         # 实盘模式
         logger.critical(f"🔴 [LIVE] 实盘开仓：{symbol} {side_str} @ ${execution_price:.2f}")
 
-        # TODO: 调用 Binance API 下单
-        # order = self.exchange_info.exchange.create_market_order(...)
-        # 验证订单成功后，再开仓
+        # P0-1 修复：实现真实下单逻辑
+        try:
+            # 1. 调用 Binance API 下单
+            side = 'buy' if signal.signal == 1 else 'sell'
 
-        self.position_manager.open_position(position)
+            if fill_type == 'market':
+                # 市价单
+                order = self.exchange_info.exchange.create_market_order(
+                    symbol=symbol,
+                    side=side,
+                    amount=position.quantity,
+                    params={
+                        'leverage': position.leverage,
+                    }
+                )
+            else:
+                # 限价单
+                order = self.exchange_info.exchange.create_limit_order(
+                    symbol=symbol,
+                    side=side,
+                    amount=position.quantity,
+                    price=execution_price,
+                    params={
+                        'leverage': position.leverage,
+                        'timeInForce': 'GTC',  # Good Till Cancel
+                    }
+                )
+
+            # 2. 验证订单是否成功
+            if not order or order.get('status') not in ['filled', 'open']:
+                error_msg = f"❌ 订单下单失败：{order}"
+                logger.error(error_msg)
+                return error_msg
+
+            # 3. 更新持仓信息
+            if order.get('status') == 'filled':
+                # 市价单立即成交
+                position.entry_price = float(order.get('average', execution_price))
+                position.order_id = order.get('id')
+                logger.info(f"✅ 订单已成交：{order.get('id')} @ ${position.entry_price:.2f}")
+            else:
+                # 限价单挂单中
+                position.order_id = order.get('id')
+                logger.info(f"⏳ 限价单已挂单：{order.get('id')} @ ${execution_price:.2f}")
+
+            # 4. 记录到仓位管理器
+            self.position_manager.open_position(position)
+
+        except Exception as e:
+            error_msg = f"❌ 实盘下单异常：{e}"
+            logger.error(error_msg, exc_info=True)
+            # 发送错误预警
+            await self.alerter.alert_error(symbol, f"下单失败: {e}")
+            return error_msg
 
         # 异步广播开仓事件（非阻塞）
         if self.state_broadcaster:
@@ -371,6 +473,7 @@ class SniperTrader:
     @exponential_backoff_retry(max_retries=3, base_delay=2.0)
     async def check_pending_orders(self) -> None:
         """
+        P0-2 修复：使用异步锁保护挂单检查
         检查挂单状态（生命周期 + 动量代偿）
 
         逻辑：
@@ -378,10 +481,16 @@ class SniperTrader:
         2. 检查动量代偿（5 分钟内创新高/低 → 市价追入）
         3. 检查价格回踩（价格触及 VWAP → 限价成交）
         """
-        if not self.pending_orders:
-            return
+        # P0-2: 使用异步锁保护整个检查过程
+        async with self._pending_lock:
+            if not self.pending_orders:
+                return
 
-        for symbol, order in list(self.pending_orders.items()):
+            # 创建副本，避免在迭代期间修改
+            orders_to_check = list(self.pending_orders.items())
+
+        # 在锁外执行耗时操作，减少锁持有时间
+        for symbol, order in orders_to_check:
             signal = order['signal']
             order_time = order['timestamp']
             vwap = order['vwap']
@@ -401,8 +510,10 @@ class SniperTrader:
             holding_minutes = holding_duration.total_seconds() / 60
 
             if holding_minutes > 60:
-                # 超时撤销
-                del self.pending_orders[symbol]
+                # P0-2: 使用锁保护删除操作
+                async with self._pending_lock:
+                    if symbol in self.pending_orders:
+                        del self.pending_orders[symbol]
                 logger.warning(f"⏰ {symbol} 挂单超时 1 小时，已撤销")
                 continue
 
@@ -421,7 +532,9 @@ class SniperTrader:
 
                     if position:
                         await self._execute_open_position(position, current_price, "MARKET_MOMENTUM")
-                        del self.pending_orders[symbol]
+                        async with self._pending_lock:
+                            if symbol in self.pending_orders:
+                                del self.pending_orders[symbol]
                         continue
 
                 elif side == Side.SHORT and current_price < breakthrough_price:
@@ -437,7 +550,9 @@ class SniperTrader:
 
                     if position:
                         await self._execute_open_position(position, current_price, "MARKET_MOMENTUM")
-                        del self.pending_orders[symbol]
+                        async with self._pending_lock:
+                            if symbol in self.pending_orders:
+                                del self.pending_orders[symbol]
                         continue
 
             # 3. 检查价格回踩（触及 VWAP → 限价成交）
@@ -454,7 +569,9 @@ class SniperTrader:
 
                 if position:
                     await self._execute_open_position(position, vwap, "LIMIT")
-                    del self.pending_orders[symbol]
+                    async with self._pending_lock:
+                        if symbol in self.pending_orders:
+                            del self.pending_orders[symbol]
                     continue
 
             elif side == Side.SHORT and current_price >= vwap:
@@ -470,7 +587,9 @@ class SniperTrader:
 
                 if position:
                     await self._execute_open_position(position, vwap, "LIMIT")
-                    del self.pending_orders[symbol]
+                    async with self._pending_lock:
+                        if symbol in self.pending_orders:
+                            del self.pending_orders[symbol]
                     continue
 
     async def update_positions(self) -> None:
