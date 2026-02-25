@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
-v5.3 狙击手模式主交易脚本（Sniper Mode Trading Service）
+v8.0 狙击手模式主交易脚本（Sniper Mode Trading Service）
 
 针对 200 USDT 超小资金的极低频、极高置信度交易系统：
 - MTF 三重共振锁开仓
+- AI Agent 双轨架构（宏观大局观 + 微观审批）
+- 自然语言数据翻译器
+- 外部情报嗅探器（Twitter + 新闻）
+- 5秒滑点硬拦截
 - 高杠杆孤注一掷（50% 资金）
 - 移动止盈追求 1:5 盈亏比
 - 把爆仓线当止损线
@@ -35,6 +39,13 @@ from src.quantitative.mtf_resonance_lock import MTFResonanceLock, MTFSignal
 from src.utils.webhook_alerter import WebhookAlerter, get_alerter
 from src.utils.api_retry import exponential_backoff_retry, classify_binance_error
 from src.monitoring.state_broadcaster import StateBroadcaster
+
+# v8.0 AI Agent 组件
+from src.ai.decision_engine import ClaudeDecisionEngine
+from src.ai.nlt_translator import NLTDataTranslator
+from src.ai.macro_oracle import MacroOracle
+from src.intelligence.web_scraper import IntelligenceSniffer
+from src.execution.slippage_hardlock import SlippageHardlock
 
 load_dotenv()
 
@@ -79,6 +90,7 @@ class SniperTrader:
         dry_run: bool = True,
         capital: float = 200.0,
         enable_broadcaster: bool = True,
+        enable_ai_agent: bool = True,  # v8.0 新增
     ) -> None:
         """
         初始化狙击手交易器
@@ -88,18 +100,45 @@ class SniperTrader:
             dry_run: 是否启用 Dry-Run 模式
             capital: 总资金（USDT）
             enable_broadcaster: 是否启用状态广播（Redis Pub/Sub）
+            enable_ai_agent: 是否启用 AI Agent（v8.0）
         """
         self.testnet = testnet
         self.dry_run = dry_run
         self.capital = capital
         self.enable_broadcaster = enable_broadcaster
+        self.enable_ai_agent = enable_ai_agent  # v8.0
 
         # 初始化组件
-        logger.info("初始化 v7.3 狙击手交易器...")
+        logger.info("初始化 v8.0 狙击手交易器...")
         self.exchange_info = BinanceExchangeInfo(testnet=testnet)
         self.position_manager = SniperPositionManager(self.exchange_info)
         self.mtf_lock = MTFResonanceLock()
         self.alerter = get_alerter()
+
+        # v8.0 AI Agent 组件
+        if self.enable_ai_agent:
+            logger.info("初始化 AI Agent 组件...")
+            self.decision_engine = ClaudeDecisionEngine()
+            self.translator = NLTDataTranslator()
+            self.scraper = IntelligenceSniffer(
+                twitter_bearer_token=os.getenv('TWITTER_BEARER_TOKEN')
+            )
+            self.macro_oracle = MacroOracle(self.decision_engine)
+            self.slippage_guard = SlippageHardlock(
+                threshold_pct=0.5,
+                timeout_sec=5.0
+            )
+            self.macro_state = None
+            self.last_macro_update = None
+            logger.info("🤖 AI Agent 组件已启动")
+        else:
+            self.decision_engine = None
+            self.translator = None
+            self.scraper = None
+            self.macro_oracle = None
+            self.slippage_guard = None
+            self.macro_state = None
+            self.last_macro_update = None
 
         # 监控的交易对
         self.watch_symbols = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT']
@@ -124,7 +163,7 @@ class SniperTrader:
     def _print_config(self) -> None:
         """打印配置信息"""
         logger.info(f"\n{'='*60}")
-        logger.info(f"🎯 v7.3 狙击手交易器已初始化")
+        logger.info(f"🎯 v8.0 狙击手交易器已初始化")
         logger.info(f"{'='*60}")
         logger.info(f"  测试网: {'是' if self.testnet else '否（主网！）'}")
         logger.info(f"  模式: {'🧪 DRY-RUN（模拟）' if self.dry_run else '🔴 LIVE（实盘！）'}")
@@ -132,6 +171,8 @@ class SniperTrader:
         logger.info(f"  监控交易对: {', '.join(self.watch_symbols)}")
         logger.info(f"  订单 TTL: 1 小时")
         logger.info(f"  动量代偿: 5 分钟内创新高/低 → 市价追入")
+        if self.enable_ai_agent:
+            logger.info(f"  AI Agent: 🤖 已启用（宏观大局观 + 微观审批 + 滑点硬拦截）")
         if self.enable_broadcaster:
             logger.info(f"  状态广播: Redis Pub/Sub（独立进程监控）")
         logger.info(f"{'='*60}\n")
@@ -139,15 +180,19 @@ class SniperTrader:
     @exponential_backoff_retry(max_retries=3, base_delay=2.0)
     async def check_and_trade(self, symbol: str) -> Optional[str]:
         """
-        检查并执行交易（订单生命周期 + 动量代偿 + Dry-Run）
+        检查并执行交易（v8.0 AI Agent + 订单生命周期 + 动量代偿 + Dry-Run）
 
         流程：
         1. MTF 三重共振检查
         2. 如果锁定，发送预警
-        3. 检查是否等待回踩
-        4. 如果需要回踩，挂单等待（TTL 1 小时）
-        5. 监控动量：5 分钟内创新高/低 → 市价追入
-        6. 执行开仓（或模拟）
+        3. v8.0: AI Agent 宏观禁令检查
+        4. v8.0: AI Agent 微观审批（3-5秒思考）
+        5. v8.0: 滑点硬拦截（0.5%阈值）
+        6. 检查是否允许开仓
+        7. 判断是否需要等待回踩
+        8. 如果需要回踩，挂单等待（TTL 1 小时）
+        9. 监控动量：5 分钟内创新高/低 → 市价追入
+        10. 执行开仓（或模拟）
 
         Args:
             symbol: 交易对
@@ -173,21 +218,39 @@ class SniperTrader:
             vwap=signal.suggested_entry_price
         )
 
-        # 4. 检查是否允许开仓
-        can_open, reason = self.position_manager.can_open_position(symbol)
-        if not can_open:
-            logger.warning(f"无法开仓 {symbol}: {reason}")
-            return None
+        # 4. v8.0: 更新宏观大局观（每小时）
+        if self.enable_ai_agent:
+            await self._update_macro_state_if_needed()
 
-        # 5. 获取当前价格
+            # 5. v8.0: 检查宏观禁令
+            if not self._check_macro_ban(symbol, side_str):
+                logger.warning(f"🚫 {symbol} {side_str} 被宏观大局观禁止")
+                return f"🚫 {symbol} {side_str} 被宏观大局观禁止"
+
+        # 6. 获取当前价格
         ticker = self.exchange_info.exchange.fetch_ticker(symbol)
         current_price = ticker['last']
+
+        # 7. v8.0: AI Agent 微观审批（如果启用）
+        if self.enable_ai_agent:
+            approved, ai_reason = await self._ai_micro_approval(
+                symbol, signal, current_price
+            )
+            if not approved:
+                logger.warning(f"🤖 AI 审批拒绝: {ai_reason}")
+                return f"🤖 AI 审批拒绝: {ai_reason}"
 
         # 异步广播价格更新（非阻塞）
         if self.state_broadcaster:
             await self.state_broadcaster.broadcast_price(symbol, current_price)
 
-        # 6. 判断是否需要等待回踩
+        # 8. 检查是否允许开仓
+        can_open, reason = self.position_manager.can_open_position(symbol)
+        if not can_open:
+            logger.warning(f"无法开仓 {symbol}: {reason}")
+            return None
+
+        # 9. 判断是否需要等待回踩
         if signal.wait_for_pullback and signal.suggested_entry_price:
             # 挂单等待回踩
             self.pending_orders[symbol] = {
@@ -202,7 +265,7 @@ class SniperTrader:
 
             return f"📝 挂单等待 {symbol} 回踩 VWAP ${signal.suggested_entry_price:.2f}"
 
-        # 7. 不需要回踩，直接市价开仓
+        # 10. 不需要回踩，直接市价开仓
         side = Side.LONG if signal.signal == 1 else Side.SHORT
         position = self.position_manager.calculate_sniper_position(
             symbol=symbol,
@@ -215,7 +278,17 @@ class SniperTrader:
             logger.error(f"❌ 仓位计算失败: {symbol}")
             return None
 
-        # 8. 执行开仓（或模拟）
+        # 11. v8.0: 滑点检查（AI 思考期间价格是否偏离）
+        if self.enable_ai_agent:
+            latest_price = self.exchange_info.exchange.fetch_ticker(symbol)['last']
+            passed, slippage_reason = self.slippage_guard.check_slippage(
+                symbol, latest_price
+            )
+            if not passed:
+                logger.warning(f"🚨 {slippage_reason}")
+                return f"🚨 {slippage_reason}"
+
+        # 12. 执行开仓（或模拟）
         return await self._execute_open_position(position, current_price, "MARKET")
 
     async def _execute_open_position(
@@ -570,6 +643,11 @@ class SniperTrader:
         """清理资源"""
         logger.info("清理资源...")
 
+        # v8.0: 关闭 Web Scraper
+        if self.scraper:
+            self.scraper.close()
+            logger.info("🔍 Web Scraper 已关闭")
+
         # 关闭状态广播器
         if self.state_broadcaster:
             await self.state_broadcaster.close()
@@ -577,6 +655,129 @@ class SniperTrader:
 
         await self.mtf_lock.close()
         await self.alerter.close()
+
+    # ==================== v8.0 AI Agent 辅助方法 ====================
+
+    async def _update_macro_state_if_needed(self) -> None:
+        """每小时更新宏观大局观"""
+        if not self.macro_oracle:
+            return
+
+        # 首次运行或距离上次更新超过 1 小时
+        if self.last_macro_update is None or \
+           (datetime.now() - self.last_macro_update).total_seconds() > 3600:
+
+            logger.info("🔄 更新宏观大局观...")
+
+            # 抓取外部情报
+            intelligence = {
+                'tweets': await self.scraper.scrape_twitter_sentiment(
+                    self.watch_symbols[0].replace('/', ''), limit=50
+                ),
+                'news': await self.scraper.scrape_macro_news(limit=10)
+            }
+
+            # 生成宏观状态
+            self.macro_state = await self.macro_oracle.generate_macro_state(
+                intelligence
+            )
+            self.last_macro_update = datetime.now()
+
+    def _check_macro_ban(self, symbol: str, side_str: str) -> bool:
+        """检查宏观禁令"""
+        if not self.macro_state:
+            return True  # 没有宏观状态，默认允许
+
+        # 检查禁令
+        if side_str.upper() in self.macro_state.trading_bans:
+            logger.warning(
+                f"🚫 {symbol} {side_str} 被宏观禁令阻止 "
+                f"(原因: {self.macro_state.reasoning})"
+            )
+            return False
+
+        return True
+
+    async def _ai_micro_approval(
+        self,
+        symbol: str,
+        signal: MTFSignal,
+        current_price: float
+    ) -> Tuple[bool, str]:
+        """
+        AI 微观审批（3-5秒思考）
+
+        Args:
+            symbol: 交易对
+            signal: MTF 信号
+            current_price: 当前价格
+
+        Returns:
+            (是否通过, 原因)
+        """
+        if not self.decision_engine:
+            return True, "AI Agent 未启用"
+
+        try:
+            # 1. 锁定触发价格（滑点保护）
+            self.slippage_guard.lock_trigger_price(symbol, current_price)
+
+            # 2. 翻译微观数据成自然语言
+            micro_snapshot = {
+                'symbol': symbol,
+                'price': current_price,
+                'funding_rate': getattr(signal, 'funding_rate', 0),
+                'obi': getattr(signal, 'obi', 0),
+                'volume_15m': getattr(signal, 'volume_15m', 0),
+                'avg_volume_15m': getattr(signal, 'avg_volume_15m', 0),
+                'ema_distance': getattr(signal, 'ema_distance', 0),
+            }
+            micro_report = self.translator.translate_micro_snapshot(micro_snapshot)
+
+            # 3. 翻译宏观状态
+            macro_report = ""
+            if self.macro_state:
+                macro_report = self.translator.translate_macro_state(
+                    self.macro_state.__dict__
+                )
+
+            # 4. 请求 AI 确认
+            logger.info(f"🤖 请求 AI 审批: {symbol}...")
+            decision = await self.decision_engine.analyze_market(
+                symbol=symbol,
+                price=current_price,
+                price_history=[],  # TODO: 从历史数据获取
+                market_data={
+                    'micro_report': micro_report,
+                    'macro_report': macro_report,
+                    'mtf_signal': {
+                        'side': 'LONG' if signal.signal == 1 else 'SHORT',
+                        'confidence': signal.confidence,
+                        'reasons': signal.reasons,
+                    }
+                }
+            )
+
+            # 5. 判断 AI 决策
+            if decision.action == 'hold':
+                return False, f"AI 建议持有（置信度: {decision.confidence:.2f}）"
+            elif decision.action == 'buy' and signal.signal == -1:
+                return False, "AI 建议买入，但 MTF 信号为做空，冲突"
+            elif decision.action == 'sell' and signal.signal == 1:
+                return False, "AI 建议卖出，但 MTF 信号为做多，冲突"
+            elif decision.confidence < 0.6:
+                return False, f"AI 置信度过低 ({decision.confidence:.2f} < 0.6)"
+            else:
+                logger.info(
+                    f"✅ AI 审批通过: {decision.action} "
+                    f"(置信度: {decision.confidence:.2f})"
+                )
+                return True, f"AI 审批通过（{decision.reasoning}）"
+
+        except Exception as e:
+            logger.error(f"AI 审批失败: {e}")
+            # 失败时保守处理：允许通过（不影响交易）
+            return True, f"AI 审批异常，默认通过（{e}）"
 
 
 def main():
@@ -602,7 +803,12 @@ def main():
             logger.info("已取消")
             return
 
-    trader = SniperTrader(testnet=testnet, dry_run=dry_run, capital=capital)
+    trader = SniperTrader(
+        testnet=testnet,
+        dry_run=dry_run,
+        capital=capital,
+        enable_ai_agent=os.getenv('ENABLE_AI_AGENT', 'true').lower() == 'true'
+    )
 
     try:
         asyncio.run(trader.run())

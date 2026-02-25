@@ -1,6 +1,6 @@
 # Sniper Trading System - 狙击手交易系统
 
-**版本**: v7.3 进程隔离架构
+**版本**: v8.0 AI Agent 双轨架构
 **最后更新**: 2026-02-25
 
 ---
@@ -13,9 +13,10 @@
 
 | 特性 | 说明 |
 |------|------|
-| 🎯 **狙击手模式** | 一周 1-2 次开仓，三重共振确认 |
+| 🤖 **AI Agent 双轨架构** | 宏观大局观（每小时）+ 微观审批（3-5秒） |
+| 🎯 **狙击手模式** | 一周 1-2 次开仓，MTF 三重共振确认 |
 | ⚡ **超低延迟** | 进程级隔离，<50ms 交易延迟 |
-| 🔒 **安全优先** | SSH 隧道访问，Redis Pub/Sub 通信 |
+| 🔒 **滑点硬拦截** | AI 思考期间价格变动 >0.5% 自动撤销 |
 | 🧪 **Dry-Run** | 完整模拟模式，零风险测试 |
 | 📡 **异步预警** | Telegram/Discord 实时通知 |
 
@@ -26,31 +27,26 @@
 ### 1. 安装依赖
 
 ```bash
-# 核心依赖（必需）
-pip install redis>=5.0.0
-
-# 监控依赖（可选）
-pip install fastapi uvicorn psutil
+pip install -r requirements.txt
 ```
 
-### 2. 启动 Redis
+### 2. 配置环境变量
 
 ```bash
-redis-server
+# 复制配置模板
+cp .env.example .env
+
+# 编辑 .env 文件，填入以下必需配置：
+# - BINANCE_API_KEY=your_key
+# - BINANCE_API_SECRET=your_secret
+# - ANTHROPIC_API_KEY=your_key  # v8.0 AI Agent 必需
+# - ENABLE_AI_AGENT=true
 ```
 
-### 3. 配置环境变量
+### 3. 启动交易系统
 
 ```bash
-# .env 文件
-BINANCE_TESTNET=true
-DRY_RUN=true
-CAPITAL=200
-```
-
-### 4. 启动交易系统
-
-```bash
+# 启动核心交易进程
 python scripts/sniper_trader.py
 ```
 
@@ -62,31 +58,89 @@ python scripts/sniper_trader.py
 
 | 文档 | 说明 |
 |------|------|
-| [README_SNIPER_OPS.md](README_SNIPER_OPS.md) | 狙击手模式操作指南 |
-| [README_WINDOWS.md](README_WINDOWS.md) | Windows 环境设置指南 |
-| [SNIPER_MODE_V5.0.md](SNIPER_MODE_V5.0.md) | v5.0 核心设计文档 |
+| [USAGE.md](docs/USAGE.md) | 完整使用指南 |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构详解 |
+| [CONFIGURATION.md](docs/CONFIGURATION.md) | 配置参数详解 |
+| [VERSION_v8.0.md](docs/VERSION_v8.0.md) | v8.0 版本说明 |
 
 ### 🏗️ 架构文档
 
 | 文档 | 说明 |
 |------|------|
-| [docs/ARCHITECTURE_ISOLATION_v7.3.md](docs/ARCHITECTURE_ISOLATION_v7.3.md) | v7.3 进程隔离架构 |
 | [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) | 系统架构总览 |
 | [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | 延迟预算设计 |
-
-### 🚀 快速启动
-
-| 文档 | 说明 |
-|------|------|
-| [docs/QUICKSTART_ISOLATION_v7.3.md](docs/QUICKSTART_ISOLATION_v7.3.md) | v7.3 快速启动指南 |
-| [docs/GETTING_STARTED.md](docs/GETTING_STARTED.md) | 新手入门指南 |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | 配置参数详解 |
 
 ### 🔧 运维文档
 
 | 文档 | 说明 |
 |------|------|
+| [docs/MONITORING_GUIDE.md](docs/MONITORING_GUIDE.md) | 监控面板使用 |
 | [docs/ENHANCED_GUIDE.md](docs/ENHANCED_GUIDE.md) | 高级使用指南 |
+
+### 📦 归档文档
+
+| 文档 | 说明 |
+|------|------|
+| [docs/archive/](docs/archive/) | 历史版本文档归档 |
+
+---
+
+## v8.0 AI Agent 架构概览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   双轨混合智能体架构                        │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ 轨道 1: 异步宏观大局观（每小时）                       │  │
+│  │                                                       │  │
+│  │  Web/Social Scraper     NLT Data Translator          │  │
+│  │  (Twitter/News)    ────→  (Prompt Engineering)       │  │
+│  │        │                       │                      │  │
+│  │        ↓                       ↓                      │  │
+│  │  "全网恐慌"          结构化自然语言                  │  │
+│  │  "多头狂欢"          (发送给 AI)                     │  │
+│  │        │                       │                      │  │
+│  │        └───────────────────────┼───────────────┐     │  │
+│  │                                ↓               │     │  │
+│  │  ┌──────────────────────────────────────────────┐ │     │  │
+│  │  │  AI 宏观大局观（CoT 深度思考）             │ │     │  │
+│  │  │  - 全局市场状态                           │ │     │  │
+│  │  │  - 主导叙事分析                           │ │     │  │
+│  │  │  - 交易禁区声明                           │ │     │  │
+│  │  └──────────────────────────────────────────────┘ │     │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │ 轨道 2: 同步微观审批（触发瞬间）                       │  │
+│  │                                                       │  │
+│  │  MTF Trigger                                      │     │
+│  │  (放量突破)  ───→  锁定 Trigger_Price              │     │  │
+│  │        │                       │                      │     │  │
+│  │        ↓                       ↓                      │     │  │
+│  │  Micro Data         NLT Data Translator           │     │  │
+│  │  (Order Book)  ────→  (技术面报告)                │     │  │
+│  │        │                       │                      │     │  │
+│  │        └───────────────────────┼───────────────┐     │  │
+│  │                                ↓               │     │  │
+│  │  ┌──────────────────────────────────────────────┐ │     │  │
+│  │  │  AI Final Confirmation (3-5 秒思考)        │ │     │  │
+│  │  │  - CoT 推理链                             │ │     │  │
+│  │  │  - BUY/SELL/PASS                         │ │     │  │
+│  │  │  - Confidence 0-1                        │ │     │  │
+│  │  └──────────────────────────────────────────────┘ │     │  │
+│  │                                │               │     │  │
+│  │                                ↓               │     │  │
+│  │  ┌──────────────────────────────────────────────┐ │     │  │
+│  │  │  Slippage Hard-Lock (5 秒物理铁律)        │ │     │  │
+│  │  │  if |current_price - trigger_price| > 0.5% │     │  │
+│  │  │     ABORT ("错过最佳击球区")              │ │     │  │
+│  │  └──────────────────────────────────────────────┘ │     │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -95,59 +149,59 @@ python scripts/sniper_trader.py
 ```
 sniper-trading-system/
 ├── src/
-│   ├── exchange/              # 交易所集成
+│   ├── ai/                       # AI Agent 组件
+│   │   ├── decision_engine.py    # Claude 决策引擎
+│   │   ├── nlt_translator.py     # 自然语言数据翻译器
+│   │   └── macro_oracle.py       # 宏观大局观生成器
+│   ├── intelligence/             # 情报模块
+│   │   └── web_scraper.py        # Twitter/新闻嗅探器
+│   ├── exchange/                 # 交易所集成
 │   │   ├── exchange_info_manager.py    # Binance 交易所信息
 │   │   └── sniper_position_manager.py  # 仓位管理器
-│   ├── quantitative/          # 量化策略
+│   ├── quantitative/             # 量化策略
 │   │   └── mtf_resonance_lock.py       # MTF 三重共振锁
-│   ├── monitoring/            # 监控模块
+│   ├── monitoring/               # 监控模块
 │   │   ├── state_broadcaster.py        # Redis 状态广播
 │   │   └── monitoring_daemon.py        # 独立监控守护进程
-│   └── utils/                 # 工具函数
-│       ├── webhook_alerter.py          # Telegram/Discord 预警
-│       └── api_retry.py                # API 重试机制
+│   ├── execution/                # 执行层
+│   │   └── slippage_hardlock.py        # 滑点硬拦截器
+│   └── utils/                    # 工具函数
+│       └── webhook_alerter.py          # Telegram/Discord 预警
 │
-├── scripts/                   # 执行脚本
-│   ├── sniper_trader.py       # 主交易脚本
-│   └── monitoring_daemon.py   # 监控守护进程
+├── scripts/                      # 执行脚本
+│   ├── sniper_trader.py          # 主交易脚本（v8.0）
+│   ├── monitoring_daemon.py      # 监控守护进程
+│   └── start_monitoring.py       # 监控启动脚本
 │
-├── tests/                     # 测试文件
-├── docs/                      # 文档
-│   ├── archive/               # 历史文档归档
+├── tests/                        # 测试文件
+├── docs/                         # 文档
+│   ├── archive/                  # 历史文档归档
 │   └── ...
 │
-├── logs/                      # 日志目录
-├── .env                       # 环境变量配置
-└── requirements.txt           # Python 依赖
+├── logs/                         # 日志目录
+├── .env                          # 环境变量配置
+├── .env.example                  # 环境变量模板
+└── requirements.txt              # Python 依赖
 ```
 
 ---
 
-## 架构概览
+## 交易流程
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    服务器（生产环境）                 │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│  ┌──────────────────────────────────────────────┐  │
-│  │ 进程 1: 核心交易引擎（PID: 1001）             │  │
-│  │                                              │  │
-│  │  - SniperTrader                              │  │
-│  │  - MTFResonanceLock                          │  │
-│  │  - StateBroadcaster（Redis Pub/Sub）         │  │
-│  └──────────────────────────────────────────────┘  │
-│                       │                           │
-│                       │ Redis Pub/Sub（<1ms 延迟）  │
-│                       │                           │
-│  ┌──────────────────────────────────────────────┐  │
-│  │ 进程 2: 监控守护进程（PID: 1002）             │  │
-│  │                                              │  │
-│  │  - Redis 订阅器                              │  │
-│  │  - FastAPI（127.0.0.1:8765）                 │  │
-│  └──────────────────────────────────────────────┘  │
-│                                                     │
-└─────────────────────────────────────────────────────┘
+MTF 三重共振触发
+        ↓
+   宏观禁令检查（每小时更新）
+        ↓
+   AI 微观审批（3-5秒）
+        ↓
+   锁定触发价格
+        ↓
+   AI 思考...
+        ↓
+   滑点检查（0.5%阈值，5秒超时）
+        ↓
+   执行交易 / 撤销
 ```
 
 ---
@@ -156,6 +210,7 @@ sniper-trading-system/
 
 | 版本 | 日期 | 核心变更 |
 |------|------|----------|
+| v8.0 | 2026-02-25 | AI Agent 双轨架构（宏观+微观） |
 | v7.3 | 2026-02-25 | 进程级解耦（Redis Pub/Sub） |
 | v7.2 | 2026-02-25 | 实时监控面板（已废弃） |
 | v7.1 | 2026-02-24 | 机构级工程交付 |
@@ -169,19 +224,16 @@ sniper-trading-system/
 
 ⚠️ **生产环境必须遵守**：
 
-1. **SSH 隧道访问**：禁止公网直接开放监控端口
-   ```bash
-   ssh -L 8765:127.0.0.1:8765 user@server
-   ```
-
-2. **API Key 保护**：
+1. **API Key 保护**：
    - 启用 IP 白名单
    - 只交易权限（禁止提现）
    - 定期轮换密钥
 
-3. **从小金额开始**：先用 < 10 USDT 测试
+2. **从小金额开始**：先用 < 10 USDT 测试
 
-4. **测试网验证**：主网前必须通过测试网验证
+3. **测试网验证**：主网前必须通过测试网验证
+
+4. **Dry-Run 模式**：首次运行务必使用 `DRY_RUN=true`
 
 ---
 
