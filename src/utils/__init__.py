@@ -1,5 +1,5 @@
 """
-v5.3 工具模块
+v6.0 工具模块
 """
 
 # API 重试
@@ -21,6 +21,20 @@ from .webhook_alerter import (
     get_alerter,
 )
 
+# Session 管理（v6.0 新增）
+from .session_manager import (
+    GlobalSessionManager,
+    get_session_manager,
+    close_session_manager,
+)
+
+# 系统锁（v6.0 新增）
+from .system_lock import (
+    WindowsSystemLock,
+    get_system_lock,
+    disable_network_power_saving,
+)
+
 __all__ = [
     # API 重试
     'exponential_backoff_retry',
@@ -35,4 +49,12 @@ __all__ = [
     'AlertType',
     'AlertMessage',
     'get_alerter',
+    # Session 管理
+    'GlobalSessionManager',
+    'get_session_manager',
+    'close_session_manager',
+    # 系统锁
+    'WindowsSystemLock',
+    'get_system_lock',
+    'disable_network_power_saving',
 ]

@@ -52,16 +52,16 @@ class MTFResonanceLock:
 
     def __init__(self):
         """初始化三重共振锁"""
-        self.session: Optional[aiohttp.ClientSession] = None
         self.funding_rates: Dict[str, float] = {}
         self.open_interests: Dict[str, float] = {}
 
         logger.info("✅ MTF 三重共振锁已初始化")
 
-    async def init_session(self):
-        """初始化 HTTP session"""
-        if not self.session:
-            self.session = aiohttp.ClientSession()
+    async def _get_session(self):
+        """获取全局 Session（v6.0 TLS Keep-Alive）"""
+        from src.utils.session_manager import get_session_manager
+        manager = await get_session_manager()
+        return manager.session
 
     async def fetch_4h_trend(self, symbol: str) -> Tuple[int, str]:
         """
@@ -79,7 +79,7 @@ class MTFResonanceLock:
         Returns:
             (趋势方向, 原因)
         """
-        await self.init_session()
+        session = await self._get_session()
 
         url = "https://fapi.binance.com/fapi/v1/klines"
         params = {
@@ -89,7 +89,7 @@ class MTFResonanceLock:
         }
 
         try:
-            async with self.session.get(url, params=params) as response:
+            async with session.get(url, params=params) as response:
                 data = await response.json()
 
                 if response.status != 200 or not data:
@@ -152,7 +152,7 @@ class MTFResonanceLock:
         Returns:
             (信号方向, 原因)
         """
-        await self.init_session()
+        session = await self._get_session()
 
         # 1. 获取资金费率
         funding_url = "https://fapi.binance.com/fapi/v1/premiumIndex"
@@ -173,13 +173,13 @@ class MTFResonanceLock:
 
         try:
             # 并发请求
-            async with self.session.get(funding_url, params=funding_params) as f_resp:
+            async with session.get(funding_url, params=funding_params) as f_resp:
                 funding_data = await f_resp.json()
 
-            async with self.session.get(oi_url, params=oi_params) as oi_resp:
+            async with session.get(oi_url, params=oi_params) as oi_resp:
                 oi_data = await oi_resp.json()
 
-            async with self.session.get(oi_hist_url, params=oi_hist_params) as oi_hist_resp:
+            async with session.get(oi_hist_url, params=oi_hist_params) as oi_hist_resp:
                 oi_hist_data = await oi_hist_resp.json()
 
             # 解析资金费率
@@ -264,7 +264,7 @@ class MTFResonanceLock:
         Returns:
             (信号方向, 原因, 入场信息字典)
         """
-        await self.init_session()
+        session = await self._get_session()
 
         url = "https://fapi.binance.com/fapi/v1/klines"
         params = {
@@ -274,7 +274,7 @@ class MTFResonanceLock:
         }
 
         try:
-            async with self.session.get(url, params=params) as response:
+            async with session.get(url, params=params) as response:
                 data = await response.json()
 
                 if response.status != 200 or not data:
@@ -457,9 +457,9 @@ class MTFResonanceLock:
         )
 
     async def close(self):
-        """关闭 session"""
-        if self.session:
-            await self.session.close()
+        """关闭资源"""
+        # v6.0: 不再关闭 session，由全局管理器统一管理
+        pass
 
 
 if __name__ == '__main__':
