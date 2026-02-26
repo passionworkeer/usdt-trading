@@ -150,6 +150,41 @@ class EvidenceBasedRiskController:
             f"allow_veto_override={self.allow_veto_override}"
         )
 
+    def _normalize_action(self, action: Any) -> str:
+        """
+        标准化交易动作
+
+        支持以下格式:
+        - long/Long → buy
+        - short/Short → sell
+        - buy/Buy → buy
+        - sell/Sell → sell
+        - close/Close → close (平仓，不验证价格)
+        - hold/Hold → hold
+
+        Args:
+            action: 原始动作（str 或 ActionType）
+
+        Returns:
+            标准化后的动作 (buy/sell/close/hold)
+        """
+        if hasattr(action, 'value'):
+            action = action.value
+
+        action_str = str(action).lower()
+
+        # 映射表
+        action_map = {
+            'long': 'buy',
+            'short': 'sell',
+            'buy': 'buy',
+            'sell': 'sell',
+            'close': 'close',  # 平仓单独处理
+            'hold': 'hold',
+        }
+
+        return action_map.get(action_str, 'hold')
+
     def validate(self, decision: EvidenceBasedDecision) -> Tuple[bool, str]:
         """
         验证决策是否通过风控检查
@@ -185,9 +220,9 @@ class EvidenceBasedRiskController:
             self._record_rejection(reason)
             return False, reason
 
-        # 4. 检查仓位大小（hold 操作可以为 0）
-        action = decision.action.lower() if isinstance(decision.action, str) else decision.action.value.lower()
-        if action != 'hold' and decision.position_size <= 0:
+        # 4. 检查仓位大小（hold/close 操作可以为 0）
+        action = self._normalize_action(decision.action)
+        if action not in ['hold', 'close'] and decision.position_size <= 0:
             reason = "仓位大小必须为正数"
             self._record_rejection(reason)
             return False, reason
@@ -202,13 +237,14 @@ class EvidenceBasedRiskController:
         验证价格参数的合理性
 
         根据不同的 action 类型验证价格逻辑：
-        - buy: 止损 < 入场 < 止盈
-        - sell: 止盈 < 入场 < 止损
-        - hold: 不验证
+        - buy/long: 止损 < 入场 < 止盈
+        - sell/short/close: 止盈 < 入场 < 止损
+        - hold/close: 不验证
         """
-        action = decision.action.lower() if isinstance(decision.action, str) else decision.action.value.lower()
+        action = self._normalize_action(decision.action)
 
-        if action in ['hold']:
+        # hold 和 close 操作不需要价格验证
+        if action in ['hold', 'close']:
             return True, "无需验证价格"
 
         entry = decision.entry_price
