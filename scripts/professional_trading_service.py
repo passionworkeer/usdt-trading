@@ -321,9 +321,24 @@ def main():
     args = parser.parse_args()
 
     # 检查配置
-    if not os.getenv('BINANCE_API_KEY') or not os.getenv('BINANCE_API_SECRET'):
+    api_key = os.getenv('BINANCE_API_KEY')
+    api_secret = os.getenv('BINANCE_API_SECRET')
+    if not api_key or not api_secret:
         logger.error("❌ 缺少 API 配置！请在 .env 文件中设置 BINANCE_API_KEY 和 BINANCE_API_SECRET")
         return
+
+    # 验证密钥格式（不记录完整密钥）
+    if len(api_key) < 10:
+        logger.error(f"❌ BINANCE_API_KEY 格式无效（长度: {len(api_key)}）")
+        return
+    if len(api_secret) < 10:
+        logger.error(f"❌ BINANCE_API_SECRET 格式无效（长度: {len(api_secret)}）")
+        return
+
+    # 日志脱敏记录
+    safe_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else "****"
+    safe_secret = f"{api_secret[:4]}...{api_secret[-4:]}" if len(api_secret) > 8 else "****"
+    logger.info(f"✓ API 配置已加载 (key: {safe_key}, secret: {safe_secret})")
 
     # 创建并运行交易机器人
     bot = ProfessionalTradingBot(

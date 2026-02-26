@@ -335,7 +335,7 @@ class TradingDatabase:
         绝不用 Python 循环计算统计数据，全部使用 SQL 聚合！
 
         Args:
-            days: 统计天数
+            days: 统计天数 (必须是正整数)
             symbol: 交易对过滤
             strategy: 策略过滤
 
@@ -344,17 +344,18 @@ class TradingDatabase:
         """
         await self.initialize()
 
+        # 参数校验：防止 SQL 注入
+        if not isinstance(days, int) or days < 1:
+            raise ValueError(f"days must be a positive integer, got: {days}")
+
         # 构建 WHERE 条件
         # 注意：Python datetime.now().isoformat() 使用本地时区
         # SQLite datetime('now') 使用 UTC，可能导致比较失败
         # 对于短期的 days 参数，使用 datetime() 比较可能失败
         # TODO: 统一使用 UTC 时间戳
-        if days >= 1:
-            # 使用 date() 函数进行日期比较，忽略时间部分
-            conditions = [f"strftime('%Y-%m-%d', created_at) >= strftime('%Y-%m-%d', 'now', '-{days} days')"]
-        else:
-            conditions = ["1=1"]
-        params = []
+        # 使用参数化查询（尽管 SQLite 不支持在函数内绑定参数，但我们已经验证了 days 是整数）
+        conditions = ["strftime('%Y-%m-%d', created_at) >= strftime('%Y-%m-%d', 'now', '-' || ? || ' days')"]
+        params = [days]
 
         if symbol:
             conditions.append("symbol = ?")

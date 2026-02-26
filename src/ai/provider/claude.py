@@ -50,8 +50,15 @@ class ClaudeProvider(AIBaseProvider):
         super().__init__(config)
 
         self._api_key = self._config.get("api_key") or os.environ.get("ANTHROPIC_API_KEY")
+        if not self._api_key:
+            raise ValueError("API Key must be provided via config or ANTHROPIC_API_KEY env var")
+
         self._model = self._config.get("model", DEFAULT_MODEL)
         self._client: Optional[anthropic.AsyncAnthropic] = None
+
+        # 日志脱敏 - 只显示后4位
+        safe_key = f"{'*' * 8}{self._api_key[-4:]}" if self._api_key else "None"
+        logger.debug(f"API Key configured: {safe_key}")
 
     @property
     def name(self) -> str:
@@ -76,10 +83,12 @@ class ClaudeProvider(AIBaseProvider):
 
         try:
             self._client = anthropic.AsyncAnthropic(api_key=self._api_key)
-            logger.info(f"Claude Provider 初始化成功 (model: {self._model})")
+            # 日志脱敏 - 不显示完整密钥
+            safe_key = f"{'*' * 8}{self._api_key[-4:]}" if self._api_key else "None"
+            logger.info(f"Claude Provider 初始化成功 (model: {self._model}, api_key: {safe_key})")
             return True
 
-        except Exception as e:
+        except (ValueError, anthropic.APIError) as e:
             self._set_error(f"初始化失败: {str(e)}")
             return False
 
@@ -108,15 +117,17 @@ class ClaudeProvider(AIBaseProvider):
             )
 
             response_text = response.content[0].text
+
+            # JSON 注入防护：限制响应大小（100KB）
+            if len(response_text) > 100000:
+                logger.warning(f"响应过大 ({len(response_text)} bytes)，可能存在注入攻击")
+                return self._create_fallback_decision(context, "Response too large")
+
             return self._parse_analysis_response(response_text, context)
 
-        except anthropic.APIError as e:
+        except (anthropic.APIError, anthropic.APITimeoutError) as e:
             logger.error(f"Claude API 错误: {e}")
             raise RuntimeError(f"Claude API 调用失败: {str(e)}")
-
-        except Exception as e:
-            logger.error(f"分析失败: {e}")
-            raise
 
     async def review(self, trade: TradeResult) -> ReviewReport:
         """
@@ -140,15 +151,17 @@ class ClaudeProvider(AIBaseProvider):
             )
 
             response_text = response.content[0].text
+
+            # JSON 注入防护：限制响应大小（100KB）
+            if len(response_text) > 100000:
+                logger.warning(f"响应过大 ({len(response_text)} bytes)，可能存在注入攻击")
+                return self._create_fallback_review(trade, "Response too large")
+
             return self._parse_review_response(response_text, trade)
 
-        except anthropic.APIError as e:
+        except (anthropic.APIError, anthropic.APITimeoutError) as e:
             logger.error(f"Claude API 错误: {e}")
             raise RuntimeError(f"Claude API 调用失败: {str(e)}")
-
-        except Exception as e:
-            logger.error(f"复盘失败: {e}")
-            raise
 
     async def health_check(self) -> bool:
         """
@@ -169,7 +182,7 @@ class ClaudeProvider(AIBaseProvider):
             )
             return len(response.content) > 0
 
-        except Exception as e:
+        except (anthropic.APIError, anthropic.APITimeoutError) as e:
             logger.warning(f"健康检查失败: {e}")
             return False
 
@@ -363,11 +376,26 @@ class ClaudeProvider(AIBaseProvider):
             # 解析 veto_flag
             veto_flag = bool(data.get("veto_flag", False))
 
-            # 解析价格参数
-            entry_price = float(data.get("entry_price", context.current_price))
-            stop_loss = float(data.get("stop_loss", entry_price * 0.98))  # 默认 2% 止损
-            take_profit = float(data.get("take_profit", entry_price * 1.04))  # 默认 4% 止盈
-            position_size = float(data.get("position_size", 0.0))
+            # 解析价格参数 - 添加类型转换安全
+            try:
+                entry_price = float(data.get("entry_price", context.current_price))
+            except (ValueError, TypeError):
+                entry_price = float(context.current_price)
+
+            try:
+                stop_loss = float(data.get("stop_loss", entry_price * 0.98))
+            except (ValueError, TypeError):
+                stop_loss = entry_price * 0.98
+
+            try:
+                take_profit = float(data.get("take_profit", entry_price * 1.04))
+            except (ValueError, TypeError):
+                take_profit = entry_price * 1.04
+
+            try:
+                position_size = float(data.get("position_size", 0.0))
+            except (ValueError, TypeError):
+                position_size = 0.0
 
             return EvidenceBasedDecision(
                 action=action,
@@ -386,13 +414,8 @@ class ClaudeProvider(AIBaseProvider):
                 },
             )
 
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON 解析失败: {e}")
-            # 返回保守的默认决策
-            return self._create_fallback_decision(context, str(e))
-
-        except Exception as e:
-            logger.error(f"解析响应失败: {e}")
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+            logger.error(f"解析响应失败: {type(e).__name__}: {e}")
             return self._create_fallback_decision(context, str(e))
 
     def _parse_review_response(
@@ -426,25 +449,27 @@ class ClaudeProvider(AIBaseProvider):
                 )
                 findings.append(finding)
 
+            # 解析 score - 添加类型转换安全
+            try:
+                score = float(data.get("score", 0.0))
+            except (ValueError, TypeError):
+                score = 0.0
+
             return ReviewReport(
                 trade_id=trade.symbol,
                 overall_assessment=data.get("overall_assessment", "无法解析复盘结果"),
                 findings=findings,
                 lessons_learned=data.get("lessons_learned", []),
                 improvements=data.get("improvements", []),
-                score=float(data.get("score", 0.0)),
+                score=score,
                 metadata={
                     "model": self._model,
                     "raw_response": response_text[:500],
                 },
             )
 
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON 解析失败: {e}")
-            return self._create_fallback_review(trade, str(e))
-
-        except Exception as e:
-            logger.error(f"解析复盘响应失败: {e}")
+        except (json.JSONDecodeError, ValueError, KeyError, TypeError) as e:
+            logger.error(f"解析复盘响应失败: {type(e).__name__}: {e}")
             return self._create_fallback_review(trade, str(e))
 
     def _extract_json(self, text: str) -> str:

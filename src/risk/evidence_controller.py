@@ -6,17 +6,10 @@
 import logging
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
-from enum import Enum
+
+from src.ai.provider.base import ActionType
 
 logger = logging.getLogger(__name__)
-
-
-class ActionType(Enum):
-    """交易动作类型"""
-    LONG = "long"
-    SHORT = "short"
-    CLOSE = "close"
-    HOLD = "hold"
 
 
 @dataclass
@@ -141,9 +134,9 @@ class EvidenceBasedRiskController:
             self._record_rejection(reason)
             return False, reason
 
-        # 4. 检查仓位大小（close/hold 操作可以为 0）
-        action = decision.action.lower()
-        if action not in ['close', 'hold'] and decision.position_size <= 0:
+        # 4. 检查仓位大小（hold 操作可以为 0）
+        action = decision.action.lower() if isinstance(decision.action, str) else decision.action.value.lower()
+        if action != 'hold' and decision.position_size <= 0:
             reason = "仓位大小必须为正数"
             self._record_rejection(reason)
             return False, reason
@@ -158,29 +151,37 @@ class EvidenceBasedRiskController:
         验证价格参数的合理性
 
         根据不同的 action 类型验证价格逻辑：
-        - long: 止损 < 入场 < 止盈
-        - short: 止盈 < 入场 < 止损
-        - close/hold: 不验证
+        - buy: 止损 < 入场 < 止盈
+        - sell: 止盈 < 入场 < 止损
+        - hold: 不验证
         """
-        action = decision.action.lower()
+        action = decision.action.lower() if isinstance(decision.action, str) else decision.action.value.lower()
 
-        if action in ['close', 'hold']:
+        if action in ['hold']:
             return True, "无需验证价格"
 
         entry = decision.entry_price
         stop = decision.stop_loss
         take = decision.take_profit
 
-        # 基本检查：所有价格必须为正
-        if entry <= 0 or stop <= 0 or take <= 0:
+        # 检查价格是否为零（可能是未初始化）
+        if entry == 0:
+            return False, "入场价格不能为零"
+        if stop == 0:
+            return False, "止损价格不能为零"
+        if take == 0:
+            return False, "止盈价格不能为零"
+
+        # 基本检查：所有价格必须为正数
+        if entry < 0 or stop < 0 or take < 0:
             return False, "价格必须为正数"
 
-        if action == 'long':
+        if action == 'buy':
             # 做多：止损 < 入场 < 止盈
             if not (stop < entry < take):
                 return False, f"做多价格逻辑错误: 止损({stop}) < 入场({entry}) < 止盈({take}) 不满足"
 
-        elif action == 'short':
+        elif action == 'sell':
             # 做空：止盈 < 入场 < 止损
             if not (take < entry < stop):
                 return False, f"做空价格逻辑错误: 止盈({take}) < 入场({entry}) < 止损({stop}) 不满足"
@@ -241,8 +242,8 @@ class EvidenceBasedRiskController:
             "  1. 证据数量必须 >= 最小证据数",
             "  2. 存在否决标记时阻止交易（除非允许覆盖）",
             "  3. 价格参数必须合理:",
-            "     - 做多: 止损 < 入场 < 止盈",
-            "     - 做空: 止盈 < 入场 < 止损",
+            "     - buy: 止损 < 入场 < 止盈",
+            "     - sell: 止盈 < 入场 < 止损",
             "  4. 仓位大小必须为正数",
             "",
             "请验证以上决策是否符合所有风控规则。",

@@ -1,0 +1,29 @@
+# 交易系统配置文件
+# Trading System Configuration
+
+# 风险控制参数
+risk_control:
+  # 证据链最小数量要求
+  min_evidence_count: 2
+  # 证据链最大数量限制
+  max_evidence_count: 10
+  # 是否允许覆盖否决标记
+  allow_veto_override: false
+
+# 价格验证参数
+price_validation:
+  # 最小仓位大小
+  min_position_size: 0.001
+  # 最大仓位比例 (0.0-1.0)
+  max_position_size_ratio: 1.0
+  # 默认止损比例 (0.02 = 2%)
+  default_stop_loss_pct: 0.02
+  # 默认止盈比例 (0.04 = 4%)
+  default_take_profit_pct: 0.04
+
+# AI Provider 安全参数
+ai_provider:
+  # 最大响应大小 (字节) - 防止 JSON 注入攻击
+  max_response_size: 100000
+  # 响应解析超时 (秒)
+  parse_timeout: 5.0

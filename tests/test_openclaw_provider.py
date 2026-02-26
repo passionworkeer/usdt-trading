@@ -53,29 +53,17 @@ def sample_analyze_response():
     """创建示例分析响应数据"""
     return {
         "action": "buy",
-        "confidence": 0.85,
+        "evidence_count": 2,
         "reasoning": "技术指标和情绪分析均支持做多",
         "evidence_chain": [
-            {
-                "source": "technical",
-                "metric": "rsi",
-                "value": 65.0,
-                "weight": 1.0,
-                "confidence": 0.9,
-                "description": "RSI 处于中等偏强区域",
-            },
-            {
-                "source": "sentiment",
-                "metric": "news_sentiment",
-                "value": 0.7,
-                "weight": 0.8,
-                "confidence": 0.85,
-                "description": "新闻情绪偏向积极",
-            },
+            "RSI 处于中等偏强区域 (置信度: 0.9)",
+            "新闻情绪偏向积极 (置信度: 0.85)"
         ],
-        "suggested_amount": 1000.0,
-        "stop_loss_pct": 0.02,
-        "take_profit_pct": 0.06,
+        "veto_flag": False,
+        "entry_price": 50000.0,
+        "stop_loss": 49000.0,
+        "take_profit": 53000.0,
+        "position_size": 0.1,
         "risk_level": "medium",
         "metadata": {"model": "openclaw-v1"},
     }
@@ -166,11 +154,15 @@ class TestOpenClawProviderAnalyze:
 
         assert isinstance(result, EvidenceBasedDecision)
         assert result.action == ActionType.BUY
-        assert result.confidence == 0.85
+        assert result.evidence_count == 2
         assert result.reasoning == "技术指标和情绪分析均支持做多"
-        assert isinstance(result.evidence_chain, EvidenceChain)
-        assert len(result.evidence_chain.evidences) == 2
-        assert result.risk_level == RiskLevel.MEDIUM
+        assert len(result.evidence_chain) == 2
+        assert result.veto_flag is False
+        assert result.entry_price == 50000.0
+        assert result.stop_loss == 49000.0
+        assert result.take_profit == 53000.0
+        assert result.position_size == 0.1
+        assert result.metadata.get("risk_level") == "medium"
 
         # 验证调用参数
         provider._make_request.assert_called_once()
@@ -230,21 +222,16 @@ class TestOpenClawProviderParseResponse:
 
         response_data = {
             "action": "sell",
-            "confidence": 0.75,
+            "evidence_count": 1,
             "reasoning": "技术回调信号",
             "evidence_chain": [
-                {
-                    "source": "technical",
-                    "metric": "rsi",
-                    "value": 75.0,
-                    "weight": 1.0,
-                    "confidence": 0.8,
-                    "description": "RSI 超买",
-                }
+                "RSI 超买 (置信度: 0.8)"
             ],
-            "suggested_amount": 500.0,
-            "stop_loss_pct": 0.03,
-            "take_profit_pct": 0.04,
+            "veto_flag": False,
+            "entry_price": 50000.0,
+            "stop_loss": 51000.0,
+            "take_profit": 48000.0,
+            "position_size": 0.1,
             "risk_level": "high",
             "metadata": {"model": "v2"},
         }
@@ -252,15 +239,11 @@ class TestOpenClawProviderParseResponse:
         decision = provider._parse_decision_response(response_data)
 
         assert decision.action == ActionType.SELL
-        assert decision.confidence == 0.75
+        assert decision.evidence_count == 1
         assert decision.reasoning == "技术回调信号"
-        assert decision.risk_level == RiskLevel.HIGH
-        assert len(decision.evidence_chain.evidences) == 1
-
-        evidence = decision.evidence_chain.evidences[0]
-        assert evidence.source == "technical"
-        assert evidence.metric == "rsi"
-        assert evidence.value == 75.0
+        assert decision.metadata.get("risk_level") == "high"
+        assert len(decision.evidence_chain) == 1
+        assert "RSI" in decision.evidence_chain[0]
 
     def test_parse_decision_response_minimal(self):
         """测试最小响应解析"""
@@ -268,17 +251,21 @@ class TestOpenClawProviderParseResponse:
 
         response_data = {
             "action": "hold",
-            "confidence": 0.5,
+            "evidence_count": 0,
             "reasoning": "观望",
             "evidence_chain": [],
+            "veto_flag": False,
+            "entry_price": 0.0,
+            "stop_loss": 0.0,
+            "take_profit": 0.0,
+            "position_size": 0.0,
         }
 
         decision = provider._parse_decision_response(response_data)
 
         assert decision.action == ActionType.HOLD
-        assert decision.confidence == 0.5
-        assert decision.risk_level == RiskLevel.MEDIUM  # 默认值
-        assert len(decision.evidence_chain.evidences) == 0
+        assert decision.evidence_count == 0
+        assert len(decision.evidence_chain) == 0
 
     def test_parse_decision_response_invalid_action(self):
         """测试无效动作类型处理"""
@@ -286,9 +273,14 @@ class TestOpenClawProviderParseResponse:
 
         response_data = {
             "action": "invalid_action",
-            "confidence": 0.5,
+            "evidence_count": 0,
             "reasoning": "test",
             "evidence_chain": [],
+            "veto_flag": False,
+            "entry_price": 0.0,
+            "stop_loss": 0.0,
+            "take_profit": 0.0,
+            "position_size": 0.0,
         }
 
         decision = provider._parse_decision_response(response_data)
@@ -536,7 +528,7 @@ class TestOpenClawProviderIntegration:
             decision = await provider.analyze(sample_market_context)
 
             assert decision.action == ActionType.BUY
-            assert decision.confidence == 0.85
+            assert decision.evidence_count == 2
 
         # 健康检查
         with patch.object(provider, "_make_request", new_callable=AsyncMock) as mock_request:

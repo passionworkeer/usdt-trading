@@ -138,29 +138,18 @@ class TestClaudeProviderAnalyze:
         mock_response.content = [
             MagicMock(text=json.dumps({
                 "action": "buy",
-                "confidence": 0.8,
+                "evidence_count": 2,
                 "reasoning": "技术指标显示上涨趋势",
-                "risk_level": "medium",
                 "evidence_chain": [
-                    {
-                        "source": "technical",
-                        "metric": "rsi",
-                        "value": 65,
-                        "weight": 0.8,
-                        "confidence": 0.9,
-                        "description": "RSI 显示有上涨空间"
-                    },
-                    {
-                        "source": "technical",
-                        "metric": "macd",
-                        "value": 150.5,
-                        "weight": 0.7,
-                        "confidence": 0.85,
-                        "description": "MACD 金叉"
-                    }
+                    "RSI 显示有上涨空间 (置信度: 0.9)",
+                    "MACD 金叉 (置信度: 0.85)"
                 ],
-                "stop_loss_pct": 2.0,
-                "take_profit_pct": 5.0
+                "veto_flag": False,
+                "entry_price": 50000.0,
+                "stop_loss": 49000.0,
+                "take_profit": 52500.0,
+                "position_size": 0.1,
+                "risk_level": "medium"
             }))
         ]
 
@@ -170,11 +159,15 @@ class TestClaudeProviderAnalyze:
             decision = await provider.analyze(market_context)
 
             assert decision.action == ActionType.BUY
-            assert decision.confidence == 0.8
-            assert decision.risk_level == RiskLevel.MEDIUM
-            assert len(decision.evidence_chain.evidences) == 2
-            assert decision.stop_loss_pct == 2.0
-            assert decision.take_profit_pct == 5.0
+            assert decision.evidence_count == 2
+            assert decision.reasoning == "技术指标显示上涨趋势"
+            assert decision.metadata.get("risk_level") == "medium"
+            assert len(decision.evidence_chain) == 2
+            assert decision.veto_flag is False
+            assert decision.entry_price > 0
+            assert decision.stop_loss > 0
+            assert decision.take_profit > 0
+            assert decision.position_size > 0
 
     @pytest.mark.asyncio
     async def test_analyze_sell_signal(self, provider, market_context):
@@ -183,19 +176,17 @@ class TestClaudeProviderAnalyze:
         mock_response.content = [
             MagicMock(text=json.dumps({
                 "action": "sell",
-                "confidence": 0.7,
+                "evidence_count": 1,
                 "reasoning": "技术指标显示下跌趋势",
-                "risk_level": "high",
                 "evidence_chain": [
-                    {
-                        "source": "technical",
-                        "metric": "rsi",
-                        "value": 80,
-                        "weight": 0.9,
-                        "confidence": 0.85,
-                        "description": "RSI 超买"
-                    }
-                ]
+                    "RSI 超买 (置信度: 0.85)"
+                ],
+                "veto_flag": False,
+                "entry_price": 50000.0,
+                "stop_loss": 51000.0,
+                "take_profit": 48000.0,
+                "position_size": 0.1,
+                "risk_level": "high"
             }))
         ]
 
@@ -205,8 +196,10 @@ class TestClaudeProviderAnalyze:
             decision = await provider.analyze(market_context)
 
             assert decision.action == ActionType.SELL
-            assert decision.confidence == 0.7
-            assert decision.risk_level == RiskLevel.HIGH
+            assert decision.evidence_count == 1
+            assert decision.metadata.get("risk_level") == "high"
+            assert len(decision.evidence_chain) == 1
+            assert decision.veto_flag is False
 
     @pytest.mark.asyncio
     async def test_analyze_hold_signal(self, provider, market_context):
@@ -215,10 +208,15 @@ class TestClaudeProviderAnalyze:
         mock_response.content = [
             MagicMock(text=json.dumps({
                 "action": "hold",
-                "confidence": 0.5,
+                "evidence_count": 0,
                 "reasoning": "市场方向不明确",
-                "risk_level": "low",
-                "evidence_chain": []
+                "evidence_chain": [],
+                "veto_flag": False,
+                "entry_price": 0.0,
+                "stop_loss": 0.0,
+                "take_profit": 0.0,
+                "position_size": 0.0,
+                "risk_level": "low"
             }))
         ]
 
@@ -228,7 +226,8 @@ class TestClaudeProviderAnalyze:
             decision = await provider.analyze(market_context)
 
             assert decision.action == ActionType.HOLD
-            assert decision.confidence == 0.5
+            assert decision.evidence_count == 0
+            assert len(decision.evidence_chain) == 0
 
     @pytest.mark.asyncio
     async def test_analyze_with_markdown_json(self, provider, market_context):
@@ -238,10 +237,15 @@ class TestClaudeProviderAnalyze:
             MagicMock(text='''```json
 {
     "action": "buy",
-    "confidence": 0.75,
+    "evidence_count": 0,
     "reasoning": "测试",
-    "risk_level": "medium",
-    "evidence_chain": []
+    "evidence_chain": [],
+    "veto_flag": false,
+    "entry_price": 0.0,
+    "stop_loss": 0.0,
+    "take_profit": 0.0,
+    "position_size": 0.0,
+    "risk_level": "medium"
 }
 ```''')
         ]
@@ -252,7 +256,8 @@ class TestClaudeProviderAnalyze:
             decision = await provider.analyze(market_context)
 
             assert decision.action == ActionType.BUY
-            assert decision.confidence == 0.75
+            assert decision.evidence_count == 0
+            assert len(decision.evidence_chain) == 0
 
     @pytest.mark.asyncio
     async def test_analyze_invalid_json(self, provider, market_context):
@@ -269,7 +274,7 @@ class TestClaudeProviderAnalyze:
 
             # 应该返回后备决策
             assert decision.action == ActionType.HOLD
-            assert decision.confidence == 0.0
+            assert decision.evidence_count == 0
             assert decision.metadata.get("fallback") is True
 
     @pytest.mark.asyncio
@@ -482,7 +487,8 @@ class TestClaudeProviderHelpers:
         decision = provider._create_fallback_decision(market_context, "Test error")
 
         assert decision.action == ActionType.HOLD
-        assert decision.confidence == 0.0
+        assert decision.evidence_count == 0
+        assert len(decision.evidence_chain) == 0
         assert decision.metadata.get("fallback") is True
         assert "Test error" in decision.metadata.get("error", "")
 
@@ -500,35 +506,19 @@ class TestEvidenceChain:
         mock_response.content = [
             MagicMock(text=json.dumps({
                 "action": "buy",
-                "confidence": 0.8,
+                "evidence_count": 3,
                 "reasoning": "多重证据支持",
-                "risk_level": "medium",
                 "evidence_chain": [
-                    {
-                        "source": "technical",
-                        "metric": "rsi",
-                        "value": 65,
-                        "weight": 0.8,
-                        "confidence": 0.9,
-                        "description": "RSI 有上涨空间"
-                    },
-                    {
-                        "source": "fundamental",
-                        "metric": "market_cap",
-                        "value": "900B",
-                        "weight": 0.6,
-                        "confidence": 0.7,
-                        "description": "市值稳定"
-                    },
-                    {
-                        "source": "sentiment",
-                        "metric": "news",
-                        "value": 0.6,
-                        "weight": 0.5,
-                        "confidence": 0.6,
-                        "description": "新闻情绪偏正面"
-                    }
-                ]
+                    "RSI 有上涨空间 (置信度: 0.9)",
+                    "市值稳定 (置信度: 0.7)",
+                    "新闻情绪偏正面 (置信度: 0.6)"
+                ],
+                "veto_flag": False,
+                "entry_price": 50000.0,
+                "stop_loss": 49000.0,
+                "take_profit": 52500.0,
+                "position_size": 0.1,
+                "risk_level": "medium"
             }))
         ]
 
@@ -538,15 +528,12 @@ class TestEvidenceChain:
             decision = await provider.analyze(market_context)
 
             chain = decision.evidence_chain
-            assert len(chain.evidences) == 3
+            assert len(chain) == 3
 
-            # 检查证据链方法
-            assert chain.get_total_weight() > 0
-
-            # 按来源筛选
-            technical = chain.get_by_source("technical")
-            assert len(technical) == 1
-            assert technical[0].metric == "rsi"
+            # 验证证据内容
+            assert any("RSI" in e for e in chain)
+            assert any("市值" in e for e in chain)
+            assert any("新闻" in e for e in chain)
 
 
 # ==================== 集成测试 ====================
@@ -578,7 +565,7 @@ class TestClaudeProviderIntegration:
         decision = await provider.analyze(context)
 
         assert decision.action in [ActionType.BUY, ActionType.SELL, ActionType.HOLD]
-        assert 0.0 <= decision.confidence <= 1.0
+        assert decision.evidence_count >= 0
 
 
 if __name__ == '__main__':

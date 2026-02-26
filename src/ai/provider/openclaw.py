@@ -6,6 +6,7 @@ OpenClaw AI Provider
 """
 import asyncio
 import logging
+import os
 from typing import Any, Dict, Optional
 
 import aiohttp
@@ -72,10 +73,20 @@ class OpenClawProvider(AIBaseProvider):
         """
         super().__init__(config)
         self.endpoint = endpoint.rstrip("/")
-        self.api_key = api_key
+
+        # 优先使用环境变量，支持密钥验证和日志脱敏
+        self._api_key = api_key or config.get("api_key") or os.environ.get("OPENCLAW_API_KEY")
+        if not self._api_key:
+            raise ValueError("API Key must be provided via parameter, config, or OPENCLAW_API_KEY env var")
+
+        self.api_key = self._api_key
         self.timeout = timeout
         self._session: Optional[aiohttp.ClientSession] = None
         self._version = "1.0.0"
+
+        # 日志脱敏 - 只显示后4位
+        safe_key = f"{'*' * 8}{self._api_key[-4:]}" if self._api_key else "None"
+        logger.debug(f"API Key configured: {safe_key}")
 
     @property
     def name(self) -> str:
@@ -117,11 +128,14 @@ class OpenClawProvider(AIBaseProvider):
         try:
             # 创建 session
             _ = self._get_session()
-            logger.info(f"OpenClawProvider 初始化成功: {self.endpoint}")
+
+            # 日志脱敏 - 不显示完整密钥
+            safe_key = f"{'*' * 8}{self._api_key[-4:]}" if self._api_key else "None"
+            logger.info(f"OpenClawProvider 初始化成功: endpoint={self.endpoint}, api_key={safe_key}")
             return True
-        except Exception as e:
+        except (aiohttp.ClientError, ValueError) as e:
             self._set_error(f"初始化失败: {str(e)}")
-            logger.error(f"OpenClawProvider 初始化失败: {e}")
+            logger.error(f"OpenClawProvider 初始化失败: {type(e).__name__}: {e}")
             return False
 
     async def _make_request(
@@ -209,10 +223,8 @@ class OpenClawProvider(AIBaseProvider):
 
             return decision
 
-        except OpenClawProviderError:
-            raise
-        except Exception as e:
-            logger.error(f"OpenClaw 分析失败: {e}")
+        except (OpenClawTimeoutError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"OpenClaw 分析失败: {type(e).__name__}: {e}")
             raise OpenClawAPIError(f"分析失败: {str(e)}") from e
 
     def _parse_decision_response(self, data: Dict[str, Any], current_price: float = 0.0) -> EvidenceBasedDecision:
@@ -246,11 +258,26 @@ class OpenClawProvider(AIBaseProvider):
         # 解析 veto_flag
         veto_flag = bool(data.get("veto_flag", False))
 
-        # 解析价格参数
-        entry_price = float(data.get("entry_price", current_price or data.get("current_price", 0)))
-        stop_loss = float(data.get("stop_loss", entry_price * 0.98))
-        take_profit = float(data.get("take_profit", entry_price * 1.04))
-        position_size = float(data.get("position_size", 0.0))
+        # 解析价格参数 - 添加类型转换安全
+        try:
+            entry_price = float(data.get("entry_price", current_price or data.get("current_price", 0)))
+        except (ValueError, TypeError):
+            entry_price = float(current_price) if current_price else 0.0
+
+        try:
+            stop_loss = float(data.get("stop_loss", entry_price * 0.98))
+        except (ValueError, TypeError):
+            stop_loss = entry_price * 0.98 if entry_price > 0 else 0.0
+
+        try:
+            take_profit = float(data.get("take_profit", entry_price * 1.04))
+        except (ValueError, TypeError):
+            take_profit = entry_price * 1.04 if entry_price > 0 else 0.0
+
+        try:
+            position_size = float(data.get("position_size", 0.0))
+        except (ValueError, TypeError):
+            position_size = 0.0
 
         # 构建决策对象
         decision = EvidenceBasedDecision(

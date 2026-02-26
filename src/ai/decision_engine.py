@@ -320,7 +320,7 @@ class ClaudeDecisionEngine:
             api_key: Anthropic API key（可选，默认从环境变量读取）
             enable_logging: 是否启用决策日志记录
         """
-        self.api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
+        self._api_key = api_key or os.getenv('ANTHROPIC_API_KEY')
         self.client = None
         self.enable_logging = enable_logging
         self.decision_logger = None
@@ -330,11 +330,13 @@ class ClaudeDecisionEngine:
             self.decision_logger = AIDecisionLogger()
             logger.info("AI 决策日志记录已启用")
 
-        if self.api_key:
+        if self._api_key:
             try:
                 import anthropic
-                self.client = anthropic.Anthropic(api_key=self.api_key)
-                logger.info("Claude AI 决策引擎已初始化")
+                self.client = anthropic.Anthropic(api_key=self._api_key)
+                # 日志脱敏 - 只显示后4位
+                safe_key = f"{'*' * 8}{self._api_key[-4:]}" if self._api_key else "None"
+                logger.info(f"Claude AI 决策引擎已初始化 (api_key: {safe_key})")
             except ImportError:
                 logger.warning("anthropic 库未安装，AI 功能将禁用")
                 logger.warning("安装: pip install anthropic")

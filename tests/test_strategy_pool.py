@@ -344,7 +344,7 @@ class TestStrategySelector:
         return StrategySelector(
             provider_manager=mock_provider_manager,
             risk_controller=mock_risk_controller,
-            min_confidence=0.6,
+            min_evidence_count=2,
             max_signals=10,
         )
 
@@ -389,7 +389,7 @@ class TestStrategySelector:
 
         assert result is not None
         assert result.action == ActionType.BUY
-        assert result.confidence == 0.8
+        assert result.evidence_count == 2
 
         # 验证风控被调用
         mock_risk_controller.validate.assert_called_once()
@@ -442,10 +442,10 @@ class TestStrategySelector:
         sample_market_context,
     ):
         """测试置信度过低的情况"""
-        # 设置模拟决策（低置信度）
+        # 设置模拟决策（低证据数量）
         mock_decision = EvidenceBasedDecision(
             action=ActionType.BUY,
-            confidence=0.5,  # 低于 min_confidence=0.6
+            confidence=0.5,  # Deprecated field, kept for compatibility
             reasoning="Test reasoning",
             evidence_chain=["evidence1"],
             veto_flag=False,
@@ -454,7 +454,7 @@ class TestStrategySelector:
             take_profit=55000.0,
             position_size=0.1,
             symbol="BTC/USDT",
-            evidence_count=1,
+            evidence_count=1,  # 低于 min_evidence_count=2
         )
 
         mock_provider = mock_provider_manager.get_active.return_value
@@ -464,7 +464,7 @@ class TestStrategySelector:
 
         result = await selector.select(signals, sample_market_context)
 
-        assert result is None  # 置信度过低应返回 None
+        assert result is None  # 证据数量不足应返回 None
 
     def test_get_stats(self, selector, mock_provider_manager, mock_risk_controller):
         """测试获取统计信息"""
