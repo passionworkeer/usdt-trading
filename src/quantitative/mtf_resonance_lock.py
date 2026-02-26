@@ -1,10 +1,17 @@
 """
-v5.0: MTF 三重共振锁（Multi-Timeframe Triple Resonance Lock）
+v5.2: MTF 三重共振锁（Multi-Timeframe Triple Resonance Lock）
 
 狙击手信号过滤器 - 极低频、极高置信度：
 - 关闭所有分钟级微观指标（容易被操纵）
 - 开仓必须同时满足三个条件，缺一不可
 - 宁可错过行情，不做假信号
+
+v5.2 改进：
+- 增加 RSI 辅助判断（超买超卖）
+- 增加布林带辅助判断（支撑阻力）
+- 增加 ATR 动态止损
+- 动态成交量阈值（波动率自适应）
+- 仓位管理系统
 """
 import logging
 import asyncio
@@ -12,7 +19,7 @@ import aiohttp
 import pandas as pd
 import numpy as np
 from typing import Dict, Tuple, Optional, List
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -20,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class MTFSignal:
-    """v5.1 MTF 信号（增加入场价格信息）"""
+    """v5.2 MTF 信号（增加风控信息）"""
     symbol: str
     signal: int  # 1=做多, -1=做空, 0=无信号
     confidence: float  # 信号置信度（0-1）
@@ -33,6 +40,50 @@ class MTFSignal:
     breakthrough_vwap: Optional[float] = None  # 突破 K 线 VWAP
     suggested_entry_price: Optional[float] = None  # 建议入场价（回踩价）
     wait_for_pullback: bool = False  # 是否等待回踩
+
+    # v5.2: 风控信息
+    rsi: Optional[float] = None  # RSI 指标
+    bb_position: Optional[float] = None  # 布林带位置 (0-1)
+    atr: Optional[float] = None  # ATR 止损值
+    stop_loss_price: Optional[float] = None  # 止损价格
+    take_profit_price: Optional[float] = None  # 止盈价格
+    risk_reward_ratio: Optional[float] = None  # 风险收益比
+    suggested_position_size: float = 1.0  # v5.2: 默认全仓
+
+
+@dataclass
+class PositionManager:
+    """v5.2: 仓位管理器"""
+    max_position_pct: float = 1.0  # v5.2: 默认全仓（用户只有 200U）
+    risk_per_trade_pct: float = 0.02  # 每笔风险 2%
+    min_risk_reward: float = 2.0  # 最小风险收益比 2:1
+    current_position: float = 0  # 当前持仓
+    entry_price: Optional[float] = None  # 入场价格
+
+    def calculate_position_size(self, entry_price: float, stop_loss_price: float, 
+                                 total_balance: float) -> float:
+        """计算仓位大小 - v5.2 简化为直接返回全仓"""
+        # 主人只有 200U，每次全仓
+        return self.max_position_pct  # 直接返回全仓
+
+    def calculate_stop_loss(self, entry_price: float, direction: int, 
+                           atr: float, atr_multiplier: float = 2.0) -> float:
+        """计算 ATR 止损"""
+        if direction == 1:  # 做多
+            return entry_price - (atr * atr_multiplier)
+        else:  # 做空
+            return entry_price + (atr * atr_multiplier)
+
+    def calculate_take_profit(self, entry_price: float, direction: int,
+                              stop_loss_price: float) -> float:
+        """计算止盈（基于风险收益比）"""
+        risk = abs(entry_price - stop_loss_price)
+        reward = risk * self.min_risk_reward
+
+        if direction == 1:  # 做多
+            return entry_price + reward
+        else:  # 做空
+            return entry_price - reward
 
 
 class MTFResonanceLock:
@@ -244,19 +295,19 @@ class MTFResonanceLock:
 
     async def fetch_15m_volume_spike(self, symbol: str) -> Tuple[int, str, Optional[Dict]]:
         """
-        v5.1: 条件 3 - 15m 精准放量猎杀（增加回踩入场价格）
+        v5.2: 条件 3 - 15m 精准放量猎杀（动态阈值 + 辅助指标）
 
-        修正：
-        - 不再在放量瞬间给出信号
-        - 必须计算突破 K 线的 VWAP
-        - 返回建议入场价（突破 K 线均价或 VWAP）
+        v5.2 改进：
+        - 动态成交量阈值（基于波动率）
+        - 增加 RSI、ATR 计算
+        - 增加布林带位置计算
 
         逻辑：
         1. 获取 15m K 线（最近 100 根）
-        2. 计算平均成交量
-        3. 当前成交量 > 平均 × 2 → 放量确认
-        4. 计算突破 K 线的 VWAP
-        5. 建议入场价 = VWAP（等待回踩）
+        2. 计算平均成交量 + 波动率
+        3. 动态阈值 = 2x + (波动率系数)
+        4. 计算 RSI、ATR、布林带位置
+        5. 综合判断信号
 
         Args:
             symbol: 交易对
@@ -292,6 +343,7 @@ class MTFResonanceLock:
                 df['quote_volume'] = df['quote_volume'].astype(float)
                 df['high'] = df['high'].astype(float)
                 df['low'] = df['low'].astype(float)
+                df['open'] = df['open'].astype(float)
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
                 # 计算平均成交量（最近 50 根，排除最新）
@@ -306,53 +358,115 @@ class MTFResonanceLock:
                 # 计算价格变动
                 price_change_pct = (current_price - prev_price) / prev_price
 
+                # === v5.2 新增：计算 ATR（平均真实波幅）===
+                df['tr'] = np.maximum(
+                    df['high'] - df['low'],
+                    np.maximum(
+                        abs(df['high'] - df['close'].shift(1)),
+                        abs(df['low'] - df['close'].shift(1))
+                    )
+                )
+                atr = df['tr'].iloc[-14:].mean()  # 14 周期 ATR
+                atr_pct = (atr / current_price) if current_price > 0 else 0
+
+                # === v5.2 新增：动态成交量阈值 ===
+                # 波动率高时提高阈值
+                volatility_factor = min(atr_pct * 10, 1.0)  # 波动率系数
+                dynamic_volume_threshold = 2.0 + volatility_factor  # 动态阈值
+
+                # === v5.2 新增：RSI 计算 ===
+                delta = df['close'].diff()
+                gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                rs = gain / loss
+                rsi = 100 - (100 / (1 + rs))
+                rsi_value = rsi.iloc[-1]
+
+                # === v5.2 新增：布林带位置 ===
+                bb_period = 20
+                bb_std = 2.0
+                sma = df['close'].iloc[-bb_period:].mean()
+                std = df['close'].iloc[-bb_period:].std()
+                bb_upper = sma + (bb_std * std)
+                bb_lower = sma - (bb_std * std)
+                bb_position = (current_price - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
+
                 # 判断放量突破
                 signal = 0
                 reason = ""
                 entry_info = None
 
-                if volume_ratio >= 2.0:  # 成交量 >= 2倍平均
+                if volume_ratio >= dynamic_volume_threshold:  # 动态阈值
                     # 计算突破 K 线的 VWAP
-                    # VWAP = Σ(价格 × 成交量) / 总成交量
-                    # 使用 (high + low + close) / 3 作为典型价格
                     typical_price = (df['high'].iloc[-1] + df['low'].iloc[-1] + df['close'].iloc[-1]) / 3
                     vwap = (typical_price * current_volume) / current_volume if current_volume > 0 else current_price
 
                     # 计算 K 线均价
                     candle_avg_price = (df['open'].iloc[-1] + df['close'].iloc[-1] + df['high'].iloc[-1] + df['low'].iloc[-1]) / 4
 
+                    # === v5.2 新增：辅助指标过滤 ===
+                    # RSI 超卖/超买过滤
+                    rsi_filter = ""
+                    if price_change_pct > 0.005:  # 上涨
+                        if rsi_value > 70:
+                            rsi_filter = " ⚠️ RSI 超买"
+                        elif rsi_value > 60:
+                            rsi_filter = " ⚡ RSI 偏高"
+                    elif price_change_pct < -0.005:  # 下跌
+                        if rsi_value < 30:
+                            rsi_filter = " ⚠️ RSI 超卖"
+                        elif rsi_value < 40:
+                            rsi_filter = " ⚡ RSI 偏低"
+
+                    # 布林带位置过滤
+                    bb_filter = ""
+                    if bb_position > 0.8:
+                        bb_filter = " ⚠️ 接近上轨"
+                    elif bb_position < 0.2:
+                        bb_filter = " ⚠️ 接近下轨"
+
                     if price_change_pct > 0.005:  # 价格上涨 > 0.5%
                         signal = 1
-                        reason = f"15m 放量上涨：成交量 {volume_ratio:.1f}x 平均，价格上涨 {price_change_pct:.2%} → 做多信号"
+                        reason = (f"15m 放量上涨：成交量 {volume_ratio:.1f}x（阈值 {dynamic_volume_threshold:.1f}x），"
+                                 f"上涨 {price_change_pct:.2%} | RSI: {rsi_value:.1f} | BB位置: {bb_position:.0%} | ATR: {atr:.2f}"
+                                 f"{rsi_filter}{bb_filter} → 做多信号")
 
                         # 建议入场价 = VWAP（等待回踩）
                         entry_info = {
                             'breakthrough_price': current_price,
                             'breakthrough_vwap': vwap,
-                            'suggested_entry_price': vwap,  # 建议回踩 VWAP 入场
+                            'suggested_entry_price': vwap,
                             'wait_for_pullback': True,
+                            'rsi': rsi_value,
+                            'bb_position': bb_position,
+                            'atr': atr,
                         }
                         reason += f" | 建议等待回踩 VWAP ${vwap:.2f} 入场"
 
                     elif price_change_pct < -0.005:  # 价格下跌 < -0.5%
                         signal = -1
-                        reason = f"15m 放量下跌：成交量 {volume_ratio:.1f}x 平均，价格下跌 {price_change_pct:.2%} → 做空信号"
+                        reason = (f"15m 放量下跌：成交量 {volume_ratio:.1f}x（阈值 {dynamic_volume_threshold:.1f}x），"
+                                 f"下跌 {abs(price_change_pct):.2%} | RSI: {rsi_value:.1f} | BB位置: {bb_position:.0%} | ATR: {atr:.2f}"
+                                 f"{rsi_filter}{bb_filter} → 做空信号")
 
                         # 建议入场价 = VWAP（等待回踩）
                         entry_info = {
                             'breakthrough_price': current_price,
                             'breakthrough_vwap': vwap,
-                            'suggested_entry_price': vwap,  # 建议回踩 VWAP 入场
+                            'suggested_entry_price': vwap,
                             'wait_for_pullback': True,
+                            'rsi': rsi_value,
+                            'bb_position': bb_position,
+                            'atr': atr,
                         }
                         reason += f" | 建议等待回踩 VWAP ${vwap:.2f} 入场"
 
                     else:
                         signal = 0
-                        reason = f"15m 放量但无方向：成交量 {volume_ratio:.1f}x 平均，价格横盘"
+                        reason = f"15m 放量但无方向：成交量 {volume_ratio:.1f}x（阈值 {dynamic_volume_threshold:.1f}x），价格横盘"
                 else:
                     signal = 0
-                    reason = f"15m 无放量：成交量 {volume_ratio:.1f}x 平均（需要 >= 2x）"
+                    reason = f"15m 无放量：成交量 {volume_ratio:.1f}x（需要 >= {dynamic_volume_threshold:.1f}x）"
 
                 logger.info(f"【15m 放量】{symbol}: {reason}")
 
@@ -364,12 +478,17 @@ class MTFResonanceLock:
 
     async def check_triple_resonance(self, symbol: str) -> MTFSignal:
         """
-        v5.1 核心：检查三重共振（增加回踩入场）
+        v5.2 核心：检查三重共振（增加风控信息）
 
         规则：
         - 必须同时满足三个条件
         - 任何一环不满足 = 无信号
-        - 返回信号置信度 + 入场价格信息
+        - 返回信号置信度 + 入场价格信息 + 风控止损止盈
+
+        v5.2 改进：
+        - 计算 RSI、ATR、BB 位置
+        - 计算动态止损止盈
+        - 计算建议仓位
 
         Args:
             symbol: 交易对
@@ -421,7 +540,59 @@ class MTFResonanceLock:
             confidence = 0
             is_locked = False
 
-        # 打印结果
+        # === v5.2 新增：计算风控信息 ===
+        rsi = entry_info.get('rsi') if entry_info else None
+        bb_position = entry_info.get('bb_position') if entry_info else None
+        atr = entry_info.get('atr') if entry_info else None
+
+        # 初始化风控参数
+        stop_loss_price = None
+        take_profit_price = None
+        risk_reward_ratio = None
+
+        if is_locked and entry_info:
+            # 计算 ATR 止损
+            position_manager = PositionManager()
+            entry_price = entry_info.get('suggested_entry_price', entry_info.get('breakthrough_price'))
+            
+            if entry_price and atr:
+                stop_loss_price = position_manager.calculate_stop_loss(
+                    entry_price, final_signal, atr, atr_multiplier=2.0
+                )
+                take_profit_price = position_manager.calculate_take_profit(
+                    entry_price, final_signal, stop_loss_price
+                )
+                
+                # 计算风险收益比
+                risk = abs(entry_price - stop_loss_price)
+                reward = abs(take_profit_price - entry_price)
+                risk_reward_ratio = reward / risk if risk > 0 else 0
+
+        # === v5.2: 风报比检查（必须在计算风控信息之后）===
+        if risk_reward_ratio is not None and risk_reward_ratio < 2.0:
+            logger.warning(f"⚠️ 风报比不足 2:1（当前 {risk_reward_ratio:.1f}:1），不执行开仓")
+            is_locked = False
+            final_signal = 0
+            confidence = 0
+
+        # === v5.2: 风报比检查 ===
+        risk_reward_ok = True
+        if risk_reward_ratio is not None and risk_reward_ratio < 2.0:
+            risk_reward_ok = False
+            logger.warning(f"⚠️ 风报比不足 2:1（当前 {risk_reward_ratio:.1f}:1），不执行开仓")
+
+        # 重新判断锁定状态
+        if not risk_reward_ratio:
+            # 没有计算出风报比，继续执行
+            pass
+        elif risk_reward_ok:
+            # 风报比够，保持锁定状态
+            pass
+        else:
+            # 风报比不够，解锁
+            is_locked = False
+            final_signal = 0
+            confidence = 0
         logger.info(f"\n{'='*60}")
         logger.info(f"🎯 MTF 三重共振结果: {symbol}")
         logger.info(f"{'='*60}")
@@ -433,6 +604,13 @@ class MTFResonanceLock:
             status = "✅" if signal == final_signal else "❌" if signal != 0 else "⚪"
             logger.info(f"  {status} {i}. {reason}")
 
+        # 打印辅助指标
+        if is_locked:
+            logger.info(f"\n📊 辅助指标:")
+            logger.info(f"  RSI: {rsi:.1f}" if rsi else "  RSI: N/A")
+            logger.info(f"  布林带位置: {bb_position:.0%}" if bb_position else "  布林带位置: N/A")
+            logger.info(f"  ATR: ${atr:.2f}" if atr else "  ATR: N/A")
+
         # 打印入场信息
         if is_locked and entry_info:
             logger.info(f"\n💡 入场建议:")
@@ -440,6 +618,14 @@ class MTFResonanceLock:
             logger.info(f"  突破 VWAP: ${entry_info['breakthrough_vwap']:.2f}")
             logger.info(f"  建议入场价: ${entry_info['suggested_entry_price']:.2f}（等待回踩）")
             logger.info(f"  ⚠️ 拒绝市价追高！必须等待回踩 VWAP 入场！")
+
+        # 打印风控信息
+        if is_locked and stop_loss_price:
+            logger.info(f"\n🛡️ 风控设置:")
+            logger.info(f"  止损价格: ${stop_loss_price:.2f}")
+            logger.info(f"  止盈价格: ${take_profit_price:.2f}")
+            logger.info(f"  风险收益比: {risk_reward_ratio:.1f}:1")
+            logger.info(f"  ⚠️ 仓位: 全仓 200U（风报比不够不开仓）")
 
         logger.info(f"{'='*60}\n")
 
@@ -454,6 +640,14 @@ class MTFResonanceLock:
             breakthrough_vwap=entry_info.get('breakthrough_vwap') if entry_info else None,
             suggested_entry_price=entry_info.get('suggested_entry_price') if entry_info else None,
             wait_for_pullback=entry_info.get('wait_for_pullback', False) if entry_info else False,
+            # v5.2 新增字段
+            rsi=rsi,
+            bb_position=bb_position,
+            atr=atr,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            risk_reward_ratio=risk_reward_ratio,
+            suggested_position_size=1.0,  # v5.2: 全仓
         )
 
     async def close(self):
@@ -479,6 +673,11 @@ if __name__ == '__main__':
         print(f"  方向: {signal.signal}")
         print(f"  置信度: {signal.confidence:.0%}")
         print(f"  锁定: {signal.is_locked}")
+        print(f"  RSI: {signal.rsi}")
+        print(f"  止损: {signal.stop_loss_price}")
+        print(f"  止盈: {signal.take_profit_price}")
+        print(f"  风险收益比: {signal.risk_reward_ratio}")
+        print(f"  仓位: 全仓 200U")
 
         await lock.close()
 

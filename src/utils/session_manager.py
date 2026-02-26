@@ -104,10 +104,17 @@ class GlobalSessionManager:
 
         self.initialized = True
 
-        logger.info("✅ 全局 Session 已初始化")
-        logger.info(f"   连接池: 总连接数 {self.connector.limit}, 每主机 {self.connector.limit_per_host}")
-        logger.info(f"   Keep-Alive: {self.connector.keepalive_timeout} 秒")
-        logger.info(f"   DNS 缓存: {self.connector.ttl_dns_cache} 秒")
+        logger.info("Global Session Initialized")
+        logger.info(f"   Connection Pool: {self.connector.limit} total, {self.connector.limit_per_host} per host")
+        # handle different aiohttp versions
+        try:
+            logger.info(f"   Keep-Alive: {self.connector.keepalive_timeout} seconds")
+        except AttributeError:
+            logger.info(f"   Keep-Alive: default")
+        try:
+            logger.info(f"   DNS Cache: {self.connector.ttl_dns_cache} seconds")
+        except AttributeError:
+            logger.info(f"   DNS Cache: default")
 
     async def close(self) -> None:
         """关闭 Session"""
