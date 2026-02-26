@@ -151,21 +151,21 @@ class TestStatistics:
         stats = await temp_db.get_statistics(days=30)
 
         # 验证基本计数
-        assert stats.total_trades == 9
-        assert stats.winning_trades == 6  # pnl > 0
+        assert stats.total_trades == 8  # 修正：创建了8笔交易
+        assert stats.winning_trades == 5  # pnl > 0
         assert stats.losing_trades == 3   # pnl < 0
 
         # 验证盈亏计算
         expected_total_pnl = sum(t.pnl for t in trades)
         assert abs(stats.total_pnl - expected_total_pnl) < 0.01
-        assert abs(stats.avg_pnl - expected_total_pnl / 9) < 0.01
+        assert abs(stats.avg_pnl - expected_total_pnl / 8) < 0.01  # 修正：8笔交易
 
         # 验证胜率
-        expected_win_rate = 6 / 9
+        expected_win_rate = 5 / 8  # 修正：5胜8笔
         assert abs(stats.win_rate - expected_win_rate) < 0.01
 
         # 验证执行时间
-        expected_avg_exec = sum(t.execution_time_ms for t in trades) / 9
+        expected_avg_exec = sum(t.execution_time_ms for t in trades) / 8  # 修正：8笔交易
         assert abs(stats.avg_execution_time_ms - expected_avg_exec) < 0.1
 
     @pytest.mark.asyncio

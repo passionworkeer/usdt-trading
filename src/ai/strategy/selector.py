@@ -1,5 +1,7 @@
 """
-策略选择器 - 基于 AI Provider 和风控的策略选择
+策略选择器 - 基于 AI Provider 和证据链风控的策略选择
+
+废除 confidence 浮点数玄学，改用结构化证据链进行决策。
 """
 import logging
 from typing import List, Optional, Dict, Any
@@ -41,16 +43,21 @@ class StrategySelector:
 
     功能：
     - 接收多个交易信号
-    - 调用 AI Provider 获取决策
+    - 调用 AI Provider 获取证据链决策
     - 使用证据链风控验证决策
     - 返回最终交易决策
+
+    废除 confidence 浮点数，改用证据链验证：
+    - 证据数量必须 >= 2
+    - veto_flag 必须为 False
+    - 价格参数必须合理
     """
 
     def __init__(
         self,
         provider_manager: AIProviderManager,
         risk_controller: EvidenceBasedRiskController,
-        min_confidence: float = 0.6,
+        min_evidence_count: int = 2,
         max_signals: int = 10
     ):
         """
@@ -59,12 +66,12 @@ class StrategySelector:
         Args:
             provider_manager: AI Provider 管理器
             risk_controller: 证据链风控控制器
-            min_confidence: 最小置信度
+            min_evidence_count: 最小证据数量要求（默认 2）
             max_signals: 最大信号数量
         """
         self.provider_manager = provider_manager
         self.risk_controller = risk_controller
-        self.min_confidence = min_confidence
+        self.min_evidence_count = min_evidence_count
         self.max_signals = max_signals
         self._stats = {
             'total_selections': 0,
@@ -117,18 +124,18 @@ class StrategySelector:
                 self._logger.warning(f"决策未通过风控验证: {reason}")
                 return None
 
-            # 3. 检查置信度
-            if decision.confidence < self.min_confidence:
+            # 3. 检查证据数量（最低要求）
+            if decision.evidence_count < 2:
                 self._logger.warning(
-                    f"决策置信度 ({decision.confidence:.2f}) 低于最小阈值 ({self.min_confidence:.2f})"
+                    f"证据数量不足 ({decision.evidence_count} < 2)，决策被拒绝"
                 )
                 return None
 
             self._stats['accepted'] += 1
             self._logger.info(
                 f"决策已接受: action={decision.action}, "
-                f"confidence={decision.confidence:.2f}, "
-                f"evidence_count={decision.evidence_count}"
+                f"evidence_count={decision.evidence_count}, "
+                f"veto_flag={decision.veto_flag}"
             )
 
             return decision

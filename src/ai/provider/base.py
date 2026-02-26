@@ -103,38 +103,66 @@ class EvidenceChain:
 
 @dataclass
 class EvidenceBasedDecision:
-    """基于证据的决策"""
+    """
+    基于证据的决策 - 符合证据链风控要求
+
+    废除 confidence 浮点数，改用结构化证据链。
+    所有字段必须明确，不允许模糊的置信度。
+
+    Attributes:
+        action: 交易动作 (buy/sell/hold)
+        evidence_count: 证据数量（必须与 evidence_chain 长度一致）
+        evidence_chain: 证据链列表，每项是一个具体的可验证证据
+        veto_flag: 否决标记，True 表示存在危险信号，阻止交易
+        entry_price: 入场价格
+        stop_loss: 止损价格
+        take_profit: 止盈价格
+        position_size: 仓位大小 (USDT)
+        reasoning: 分析理由（可选）
+        metadata: 额外元数据
+        timestamp: 决策时间
+    """
     action: ActionType
-    confidence: float  # 0.0 - 1.0
-    reasoning: str
-    evidence_chain: EvidenceChain = field(default_factory=EvidenceChain)
-    suggested_amount: Optional[float] = None
-    stop_loss_pct: Optional[float] = None
-    take_profit_pct: Optional[float] = None
-    risk_level: RiskLevel = RiskLevel.MEDIUM
+    evidence_count: int
+    evidence_chain: List[str]
+    veto_flag: bool
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    position_size: float
+    reasoning: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
 
     def __post_init__(self):
         """验证数据"""
-        if not 0.0 <= self.confidence <= 1.0:
-            raise ValueError(f"Confidence must be between 0.0 and 1.0, got {self.confidence}")
+        if self.evidence_count < 0:
+            raise ValueError(f"evidence_count must be non-negative, got {self.evidence_count}")
+        if self.evidence_count != len(self.evidence_chain):
+            raise ValueError(
+                f"evidence_count ({self.evidence_count}) must match "
+                f"evidence_chain length ({len(self.evidence_chain)})"
+            )
+        if self.position_size < 0:
+            raise ValueError(f"position_size must be non-negative, got {self.position_size}")
 
     @property
-    def confidence_level(self) -> ConfidenceLevel:
-        """获取置信度等级"""
-        return ConfidenceLevel.from_score(self.confidence)
+    def is_valid(self) -> bool:
+        """检查决策是否有效（未被否决且有证据）"""
+        return not self.veto_flag and self.evidence_count > 0
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
             'action': self.action.value,
-            'confidence': self.confidence,
+            'evidence_count': self.evidence_count,
+            'evidence_chain': self.evidence_chain,
+            'veto_flag': self.veto_flag,
+            'entry_price': self.entry_price,
+            'stop_loss': self.stop_loss,
+            'take_profit': self.take_profit,
+            'position_size': self.position_size,
             'reasoning': self.reasoning,
-            'suggested_amount': self.suggested_amount,
-            'stop_loss_pct': self.stop_loss_pct,
-            'take_profit_pct': self.take_profit_pct,
-            'risk_level': self.risk_level.value,
             'metadata': self.metadata,
             'timestamp': self.timestamp.isoformat() if isinstance(self.timestamp, datetime) else self.timestamp,
         }

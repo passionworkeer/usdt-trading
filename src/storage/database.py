@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class Trade:
-    """交易记录数据类"""
+    """交易记录数据类 (v9.0 证据链架构)"""
     id: Optional[int] = None
+    order_id: Optional[str] = None
     symbol: str = ""
     side: str = ""  # BUY or SELL
     quantity: float = 0.0
@@ -29,12 +30,22 @@ class Trade:
     strategy: str = ""  # 策略名称
     signal_strength: float = 0.0  # 信号强度
     execution_time_ms: int = 0  # 执行耗时
+    # 证据链字段 (v9.0)
+    evidence_count: int = 0
+    evidence_chain: List[str] = None  # JSON 格式存储
+    veto_flag: bool = False
+    entry_price: float = 0.0
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
+    position_size: float = 0.0
     metadata: Dict[str, Any] = None  # 额外元数据
     created_at: Optional[str] = None
 
     def __post_init__(self):
         if self.metadata is None:
             self.metadata = {}
+        if self.evidence_chain is None:
+            self.evidence_chain = []
         if self.created_at is None:
             self.created_at = datetime.now().isoformat()
 
@@ -110,10 +121,11 @@ class TradingDatabase:
                 # 启用外键约束
                 await db.execute("PRAGMA foreign_keys = ON")
 
-                # 创建交易表
+                # 创建交易表（v9.0 证据链架构）
                 await db.execute("""
                     CREATE TABLE IF NOT EXISTS trades (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        order_id TEXT UNIQUE,
                         symbol TEXT NOT NULL,
                         side TEXT NOT NULL CHECK(side IN ('BUY', 'SELL')),
                         quantity REAL NOT NULL CHECK(quantity > 0),
@@ -123,6 +135,14 @@ class TradingDatabase:
                         strategy TEXT,
                         signal_strength REAL DEFAULT 0,
                         execution_time_ms INTEGER DEFAULT 0,
+                        -- 证据链字段 (v9.0)
+                        evidence_count INTEGER DEFAULT 0,
+                        evidence_chain TEXT,
+                        veto_flag BOOLEAN DEFAULT 0,
+                        entry_price REAL,
+                        stop_loss REAL,
+                        take_profit REAL,
+                        position_size REAL,
                         metadata TEXT,
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
@@ -188,11 +208,14 @@ class TradingDatabase:
                 cursor = await db.execute(
                     """
                     INSERT INTO trades
-                    (symbol, side, quantity, price, pnl, fee, strategy,
-                     signal_strength, execution_time_ms, metadata, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (order_id, symbol, side, quantity, price, pnl, fee, strategy,
+                     signal_strength, execution_time_ms, evidence_count, evidence_chain,
+                     veto_flag, entry_price, stop_loss, take_profit, position_size,
+                     metadata, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        trade.order_id,
                         trade.symbol,
                         trade.side,
                         trade.quantity,
@@ -202,6 +225,13 @@ class TradingDatabase:
                         trade.strategy,
                         trade.signal_strength,
                         trade.execution_time_ms,
+                        trade.evidence_count,
+                        json.dumps(trade.evidence_chain) if trade.evidence_chain else None,
+                        1 if trade.veto_flag else 0,
+                        trade.entry_price,
+                        trade.stop_loss,
+                        trade.take_profit,
+                        trade.position_size,
                         json.dumps(trade.metadata) if trade.metadata else None,
                         trade.created_at or datetime.now().isoformat()
                     )
@@ -315,7 +345,15 @@ class TradingDatabase:
         await self.initialize()
 
         # 构建 WHERE 条件
-        conditions = [f"created_at >= datetime('now', '-{days} days')"]
+        # 注意：Python datetime.now().isoformat() 使用本地时区
+        # SQLite datetime('now') 使用 UTC，可能导致比较失败
+        # 对于短期的 days 参数，使用 datetime() 比较可能失败
+        # TODO: 统一使用 UTC 时间戳
+        if days >= 1:
+            # 使用 date() 函数进行日期比较，忽略时间部分
+            conditions = [f"strftime('%Y-%m-%d', created_at) >= strftime('%Y-%m-%d', 'now', '-{days} days')"]
+        else:
+            conditions = ["1=1"]
         params = []
 
         if symbol:
@@ -347,57 +385,60 @@ class TradingDatabase:
             )
             row = await cursor.fetchone()
 
-            # 计算最大回撤（需要按时间序列计算累积收益）
-            max_dd_cursor = await db.execute(
+            # 计算最大回撤（简化版 - 分步计算）
+            # 第一步：获取每日收益和累计收益
+            daily_cursor = await db.execute(
                 f"""
-                WITH daily_pnl AS (
-                    SELECT
-                        date(created_at) as date,
-                        SUM(pnl) as daily_pnl
-                    FROM trades
-                    {where_clause}
-                    GROUP BY date(created_at)
-                ),
-                cumulative AS (
-                    SELECT
-                        date,
-                        daily_pnl,
-                        SUM(daily_pnl) OVER (ORDER BY date) as cum_pnl
-                    FROM daily_pnl
-                )
                 SELECT
-                    MIN(cum_pnl - MAX(cum_pnl) OVER (ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) as max_drawdown
-                FROM cumulative
+                    date(created_at) as date,
+                    SUM(pnl) as daily_pnl
+                FROM trades
+                {where_clause}
+                GROUP BY date(created_at)
+                ORDER BY date
                 """,
                 params
             )
-            max_dd_row = await max_dd_cursor.fetchone()
+            daily_rows = await daily_cursor.fetchall()
+
+            # 在 Python 中计算最大回撤（更简单且不依赖复杂窗口函数）
+            max_drawdown = 0.0
+            if daily_rows:
+                cum_pnl = 0.0
+                peak_pnl = 0.0
+                for row in daily_rows:
+                    cum_pnl += row[1]  # daily_pnl
+                    if cum_pnl > peak_pnl:
+                        peak_pnl = cum_pnl
+                    dd = cum_pnl - peak_pnl
+                    if dd < max_drawdown:
+                        max_drawdown = dd
 
         # 构建统计结果
         stats = TradeStatistics()
         stats.period_days = days
 
-        if row and row[0]:
-            stats.total_trades = row[0]
+        if row and len(row) >= 3:
+            stats.total_trades = row[0] or 0
             stats.winning_trades = row[1] or 0
             stats.losing_trades = row[2] or 0
             stats.total_pnl = row[3] or 0.0
             stats.avg_pnl = row[4] or 0.0
-            stats.avg_execution_time_ms = row[8] or 0.0
+            stats.avg_execution_time_ms = row[8] or 0.0 if len(row) > 8 else 0.0
 
             # 计算胜率
             if stats.total_trades > 0:
                 stats.win_rate = stats.winning_trades / stats.total_trades
 
             # 计算盈亏比
-            avg_win = row[5] or 0
-            avg_loss = abs(row[6] or 0)
-            if avg_loss > 0:
-                stats.profit_factor = avg_win / avg_loss
+            if len(row) >= 7:
+                avg_win = row[5] or 0
+                avg_loss = abs(row[6] or 0)
+                if avg_loss > 0:
+                    stats.profit_factor = avg_win / avg_loss
 
         # 最大回撤
-        if max_dd_row and max_dd_row[0]:
-            stats.max_drawdown = abs(max_dd_row[0])
+        stats.max_drawdown = abs(max_drawdown)
 
         return stats
 
@@ -494,8 +535,16 @@ class TradingDatabase:
             except json.JSONDecodeError:
                 pass
 
+        evidence_chain = []
+        if row['evidence_chain']:
+            try:
+                evidence_chain = json.loads(row['evidence_chain'])
+            except json.JSONDecodeError:
+                pass
+
         return Trade(
             id=row['id'],
+            order_id=row['order_id'],
             symbol=row['symbol'],
             side=row['side'],
             quantity=row['quantity'],
@@ -505,6 +554,13 @@ class TradingDatabase:
             strategy=row['strategy'] or '',
             signal_strength=row['signal_strength'] or 0.0,
             execution_time_ms=row['execution_time_ms'] or 0,
+            evidence_count=row['evidence_count'] or 0,
+            evidence_chain=evidence_chain,
+            veto_flag=bool(row['veto_flag']),
+            entry_price=row['entry_price'] or 0.0,
+            stop_loss=row['stop_loss'] or 0.0,
+            take_profit=row['take_profit'] or 0.0,
+            position_size=row['position_size'] or 0.0,
             metadata=metadata,
             created_at=row['created_at']
         )

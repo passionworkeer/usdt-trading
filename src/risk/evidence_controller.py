@@ -141,8 +141,9 @@ class EvidenceBasedRiskController:
             self._record_rejection(reason)
             return False, reason
 
-        # 4. 检查仓位大小
-        if decision.position_size <= 0:
+        # 4. 检查仓位大小（close/hold 操作可以为 0）
+        action = decision.action.lower()
+        if action not in ['close', 'hold'] and decision.position_size <= 0:
             reason = "仓位大小必须为正数"
             self._record_rejection(reason)
             return False, reason

@@ -18,9 +18,6 @@ from .base import (
     TradeResult,
     ReviewReport,
     ActionType,
-    RiskLevel,
-    Evidence,
-    EvidenceChain,
     ReviewFinding,
 )
 
@@ -224,35 +221,38 @@ class ClaudeProvider(AIBaseProvider):
 ```json
 {{
   "action": "buy|sell|hold",
-  "confidence": 0.0-1.0,
-  "reasoning": "主要分析理由的简短总结",
-  "risk_level": "low|medium|high",
+  "evidence_count": 3,
   "evidence_chain": [
-    {{
-      "source": "technical|fundamental|sentiment|onchain",
-      "metric": "指标名称",
-      "value": "指标值",
-      "weight": 0.0-1.0,
-      "confidence": 0.0-1.0,
-      "description": "证据描述"
-    }}
+    "证据1: 具体的可验证的市场现象，如 'RSI 低于30，处于超卖区域'",
+    "证据2: 具体的可验证的市场现象，如 '价格突破20日均线'",
+    "证据3: 具体的可验证的市场现象，如 '成交量放大50%'"
   ],
-  "suggested_amount": 建议交易金额（可选）,
-  "stop_loss_pct": 止损百分比（可选，如 2.0 表示 2%）,
-  "take_profit_pct": 止盈百分比（可选）
+  "veto_flag": false,
+  "veto_reason": "如果 veto_flag 为 true，说明否决原因",
+  "entry_price": 建议入场价格,
+  "stop_loss": 止损价格,
+  "take_profit": 止盈价格,
+  "position_size": 建议仓位大小(USDT),
+  "reasoning": "主要分析理由的简短总结"
 }}
 ```
 
-### 证据链要求：
-1. 至少提供 3 条证据
-2. 每条证据必须有明确的来源、指标和描述
-3. 权重和置信度要客观反映证据的重要性
-4. 证据应涵盖技术面、基本面和情绪面
+### 证据链要求（重要！）：
+1. **必须至少提供 2 条证据**，否则交易会被风控拒绝
+2. 每条证据必须是**具体、可验证**的市场现象，不能是模糊的感觉
+3. 如果市场存在任何**危险信号**（如异常波动、重大新闻），必须设置 `veto_flag = true`
+4. 如果无法找到 2 个以上具体证据，直接返回 `action: "hold"`
 
 ### 决策标准：
-- action: buy（买入）、sell（卖出）或 hold（观望）
-- confidence: 0.0-1.0，表示对决策的置信度
-- risk_level: low（低风险）、medium（中等风险）、high（高风险）
+- `action`: buy（买入）、sell（卖出）或 hold（观望）
+- `evidence_count`: 必须与 evidence_chain 数组长度一致
+- `veto_flag`: 存在危险信号时设为 true，阻止交易
+- `entry_price`, `stop_loss`, `take_profit`: 具体价格数值
+- `position_size`: 建议仓位大小（USDT）
+
+### 价格逻辑：
+- 做多: stop_loss < entry_price < take_profit
+- 做空: take_profit < entry_price < stop_loss
 
 请直接输出 JSON，不要包含其他解释。
 """
@@ -350,26 +350,35 @@ class ClaudeProvider(AIBaseProvider):
             action_str = data.get("action", "hold").lower()
             action = self._parse_action(action_str)
 
-            # 解析 confidence
-            confidence = float(data.get("confidence", 0.5))
-            confidence = max(0.0, min(1.0, confidence))
+            # 解析证据链
+            evidence_chain = data.get("evidence_chain", [])
+            if isinstance(evidence_chain, list):
+                # 确保所有证据都是字符串
+                evidence_chain = [str(e) for e in evidence_chain]
+            else:
+                evidence_chain = []
 
-            # 解析 risk_level
-            risk_str = data.get("risk_level", "medium").lower()
-            risk_level = self._parse_risk_level(risk_str)
+            evidence_count = len(evidence_chain)
 
-            # 构建证据链
-            evidence_chain = self._parse_evidence_chain(data.get("evidence_chain", []))
+            # 解析 veto_flag
+            veto_flag = bool(data.get("veto_flag", False))
+
+            # 解析价格参数
+            entry_price = float(data.get("entry_price", context.current_price))
+            stop_loss = float(data.get("stop_loss", entry_price * 0.98))  # 默认 2% 止损
+            take_profit = float(data.get("take_profit", entry_price * 1.04))  # 默认 4% 止盈
+            position_size = float(data.get("position_size", 0.0))
 
             return EvidenceBasedDecision(
                 action=action,
-                confidence=confidence,
-                reasoning=data.get("reasoning", "无分析理由"),
+                evidence_count=evidence_count,
                 evidence_chain=evidence_chain,
-                suggested_amount=data.get("suggested_amount"),
-                stop_loss_pct=data.get("stop_loss_pct"),
-                take_profit_pct=data.get("take_profit_pct"),
-                risk_level=risk_level,
+                veto_flag=veto_flag,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                position_size=position_size,
+                reasoning=data.get("reasoning", "无分析理由"),
                 metadata={
                     "model": self._model,
                     "symbol": context.symbol,
@@ -479,44 +488,6 @@ class ClaudeProvider(AIBaseProvider):
         }
         return action_map.get(action_str.lower(), ActionType.HOLD)
 
-    def _parse_risk_level(self, risk_str: str) -> RiskLevel:
-        """解析风险等级"""
-        risk_map = {
-            "low": RiskLevel.LOW,
-            "medium": RiskLevel.MEDIUM,
-            "high": RiskLevel.HIGH,
-        }
-        return risk_map.get(risk_str.lower(), RiskLevel.MEDIUM)
-
-    def _parse_evidence_chain(self, evidence_list: List[Dict]) -> EvidenceChain:
-        """
-        解析证据链
-
-        Args:
-            evidence_list: 证据列表
-
-        Returns:
-            EvidenceChain
-        """
-        chain = EvidenceChain()
-
-        for item in evidence_list:
-            try:
-                evidence = Evidence(
-                    source=item.get("source", "unknown"),
-                    metric=item.get("metric", "unknown"),
-                    value=item.get("value", None),
-                    weight=float(item.get("weight", 1.0)),
-                    confidence=float(item.get("confidence", 1.0)),
-                    description=item.get("description", ""),
-                )
-                chain.add_evidence(evidence)
-
-            except Exception as e:
-                logger.warning(f"解析证据失败: {e}, item: {item}")
-
-        return chain
-
     def _format_indicators(self, indicators: Dict[str, Any]) -> str:
         """格式化技术指标"""
         if not indicators:
@@ -553,13 +524,18 @@ class ClaudeProvider(AIBaseProvider):
             error: 错误信息
 
         Returns:
-            保守的默认决策
+            保守的默认决策（veto_flag=True，阻止交易）
         """
         return EvidenceBasedDecision(
             action=ActionType.HOLD,
-            confidence=0.0,
+            evidence_count=1,
+            evidence_chain=[f"解析失败，建议观望: {error[:100]}"],
+            veto_flag=True,  # 阻止交易
+            entry_price=context.current_price,
+            stop_loss=context.current_price * 0.98,
+            take_profit=context.current_price * 1.02,
+            position_size=0.0,  # 不开仓
             reasoning=f"解析失败，建议观望: {error}",
-            risk_level=RiskLevel.HIGH,
             metadata={
                 "error": error,
                 "symbol": context.symbol,

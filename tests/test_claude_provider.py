@@ -37,7 +37,7 @@ def mock_api_key():
 @pytest.fixture
 def provider(mock_api_key):
     """创建 Provider 实例"""
-    provider = ClaudeProvider(api_key=mock_api_key)
+    provider = ClaudeProvider(config={"api_key": mock_api_key})
     provider.initialize()
     return provider
 
@@ -83,7 +83,7 @@ class TestClaudeProviderInit:
 
     def test_init_with_api_key(self, mock_api_key):
         """测试使用 API Key 初始化"""
-        provider = ClaudeProvider(api_key=mock_api_key)
+        provider = ClaudeProvider(config={"api_key": mock_api_key})
 
         assert provider.name == "claude"
         assert provider.version == "1.0.0"

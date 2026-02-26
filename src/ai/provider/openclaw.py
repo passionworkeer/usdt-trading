@@ -13,13 +13,9 @@ import aiohttp
 from .base import (
     AIBaseProvider,
     ActionType,
-    ConfidenceLevel,
-    Evidence,
-    EvidenceChain,
     EvidenceBasedDecision,
     MarketContext,
     ReviewReport,
-    RiskLevel,
     TradeResult,
 )
 
@@ -203,11 +199,12 @@ class OpenClawProvider(AIBaseProvider):
             )
 
             # 解析响应数据
-            decision = self._parse_decision_response(response_data)
+            decision = self._parse_decision_response(response_data, context.current_price)
 
             logger.info(
                 f"OpenClaw 分析完成: action={decision.action}, "
-                f"confidence={decision.confidence:.2f}"
+                f"evidence_count={decision.evidence_count}, "
+                f"veto_flag={decision.veto_flag}"
             )
 
             return decision
@@ -218,31 +215,17 @@ class OpenClawProvider(AIBaseProvider):
             logger.error(f"OpenClaw 分析失败: {e}")
             raise OpenClawAPIError(f"分析失败: {str(e)}") from e
 
-    def _parse_decision_response(self, data: Dict[str, Any]) -> EvidenceBasedDecision:
+    def _parse_decision_response(self, data: Dict[str, Any], current_price: float = 0.0) -> EvidenceBasedDecision:
         """
         解析 OpenClaw API 响应数据
 
         Args:
             data: API 响应数据
+            current_price: 当前价格（用于默认值）
 
         Returns:
             EvidenceBasedDecision 对象
         """
-        # 解析证据链
-        evidence_chain = EvidenceChain()
-        evidence_list = data.get("evidence_chain", [])
-
-        for evidence_data in evidence_list:
-            evidence = Evidence(
-                source=evidence_data.get("source", "unknown"),
-                metric=evidence_data.get("metric", ""),
-                value=evidence_data.get("value"),
-                weight=evidence_data.get("weight", 1.0),
-                confidence=evidence_data.get("confidence", 1.0),
-                description=evidence_data.get("description", ""),
-            )
-            evidence_chain.add_evidence(evidence)
-
         # 解析动作类型
         action_str = data.get("action", "HOLD").upper()
         try:
@@ -250,23 +233,36 @@ class OpenClawProvider(AIBaseProvider):
         except ValueError:
             action = ActionType.HOLD
 
-        # 解析风险等级
-        risk_str = data.get("risk_level", "medium").lower()
-        try:
-            risk_level = RiskLevel(risk_str)
-        except ValueError:
-            risk_level = RiskLevel.MEDIUM
+        # 解析证据链
+        evidence_chain = data.get("evidence_chain", [])
+        if isinstance(evidence_chain, list):
+            # 确保所有证据都是字符串
+            evidence_chain = [str(e) for e in evidence_chain]
+        else:
+            evidence_chain = []
+
+        evidence_count = len(evidence_chain)
+
+        # 解析 veto_flag
+        veto_flag = bool(data.get("veto_flag", False))
+
+        # 解析价格参数
+        entry_price = float(data.get("entry_price", current_price or data.get("current_price", 0)))
+        stop_loss = float(data.get("stop_loss", entry_price * 0.98))
+        take_profit = float(data.get("take_profit", entry_price * 1.04))
+        position_size = float(data.get("position_size", 0.0))
 
         # 构建决策对象
         decision = EvidenceBasedDecision(
             action=action,
-            confidence=float(data.get("confidence", 0.0)),
-            reasoning=data.get("reasoning", ""),
+            evidence_count=evidence_count,
             evidence_chain=evidence_chain,
-            suggested_amount=data.get("suggested_amount"),
-            stop_loss_pct=data.get("stop_loss_pct"),
-            take_profit_pct=data.get("take_profit_pct"),
-            risk_level=risk_level,
+            veto_flag=veto_flag,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            position_size=position_size,
+            reasoning=data.get("reasoning", ""),
             metadata=data.get("metadata", {}),
         )
 

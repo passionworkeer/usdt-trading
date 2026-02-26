@@ -67,9 +67,18 @@ class MockProvider(AIBaseProvider):
 
         return EvidenceBasedDecision(
             action=ActionType.BUY,
-            confidence=0.8,
+            evidence_count=3,
+            evidence_chain=[
+                f"证据1: {context.symbol} 技术指标良好",
+                f"证据2: RSI 低于30，超卖区域",
+                f"证据3: 成交量放大确认趋势"
+            ],
+            veto_flag=False,
+            entry_price=context.current_price,
+            stop_loss=context.current_price * 0.98,
+            take_profit=context.current_price * 1.04,
+            position_size=100.0,
             reasoning=f"Mock analysis for {context.symbol}",
-            risk_level=RiskLevel.MEDIUM,
         )
 
     async def review(self, trade: TradeResult) -> ReviewReport:
@@ -172,30 +181,47 @@ class TestEvidenceBasedDecision:
         """测试创建决策"""
         decision = EvidenceBasedDecision(
             action=ActionType.BUY,
-            confidence=0.8,
+            evidence_count=3,
+            evidence_chain=["证据1", "证据2", "证据3"],
+            veto_flag=False,
+            entry_price=50000.0,
+            stop_loss=49000.0,
+            take_profit=52000.0,
+            position_size=100.0,
             reasoning="Strong uptrend",
-            risk_level=RiskLevel.MEDIUM,
         )
 
         assert decision.action == ActionType.BUY
-        assert decision.confidence == 0.8
-        assert decision.risk_level == RiskLevel.MEDIUM
+        assert decision.evidence_count == 3
+        assert decision.veto_flag == False
 
     def test_confidence_validation(self):
-        """测试置信度验证"""
+        """测试证据数量验证（替代原来的置信度测试）"""
         # 有效范围
         decision = EvidenceBasedDecision(
             action=ActionType.HOLD,
-            confidence=0.5,
+            evidence_count=2,
+            evidence_chain=["证据1", "证据2"],
+            veto_flag=False,
+            entry_price=50000.0,
+            stop_loss=49000.0,
+            take_profit=51000.0,
+            position_size=0.0,
             reasoning="Test",
         )
-        assert decision.confidence == 0.5
+        assert decision.evidence_count == 2
 
-        # 超出范围
+        # 证据数量不匹配
         with pytest.raises(ValueError):
             EvidenceBasedDecision(
                 action=ActionType.HOLD,
-                confidence=1.5,
+                evidence_count=3,  # 错误：与列表长度不匹配
+                evidence_chain=["证据1", "证据2"],
+                veto_flag=False,
+                entry_price=50000.0,
+                stop_loss=49000.0,
+                take_profit=51000.0,
+                position_size=0.0,
                 reasoning="Test",
             )
 
@@ -203,16 +229,21 @@ class TestEvidenceBasedDecision:
         """测试转换为字典"""
         decision = EvidenceBasedDecision(
             action=ActionType.SELL,
-            confidence=0.7,
+            evidence_count=2,
+            evidence_chain=["证据1", "证据2"],
+            veto_flag=False,
+            entry_price=50000.0,
+            stop_loss=51000.0,
+            take_profit=48000.0,
+            position_size=100.0,
             reasoning="Downtrend",
-            risk_level=RiskLevel.HIGH,
         )
 
         data = decision.to_dict()
 
         assert data['action'] == "sell"
-        assert data['confidence'] == 0.7
-        assert data['risk_level'] == "high"
+        assert data['evidence_count'] == 2
+        assert data['veto_flag'] == False
 
 
 class TestTradeResult:
@@ -468,7 +499,8 @@ class TestAIProviderManager:
         decision = await manager.analyze(context)
 
         assert decision.action == ActionType.BUY
-        assert decision.confidence == 0.8
+        assert decision.evidence_count == 3
+        assert decision.veto_flag == False
 
     @pytest.mark.asyncio
     async def test_analyze_with_fallback(self):
