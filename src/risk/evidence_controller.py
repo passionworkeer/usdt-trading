@@ -4,12 +4,54 @@
 废除浮点数 confidence，改用结构化证据链进行决策验证
 """
 import logging
+import os
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass, field
+
+import yaml
 
 from src.ai.provider.base import ActionType
 
 logger = logging.getLogger(__name__)
+
+# 默认配置值
+DEFAULT_MIN_EVIDENCE_COUNT = 2
+DEFAULT_MAX_EVIDENCE_COUNT = 10
+DEFAULT_ALLOW_VETO_OVERRIDE = False
+
+
+def _load_config() -> Dict[str, Any]:
+    """加载配置文件"""
+    config_path = os.environ.get("TRADING_CONFIG_PATH", "config/trading_config.yaml")
+    default_config = {
+        "risk_control": {
+            "min_evidence_count": 2,
+            "max_evidence_count": 10,
+            "allow_veto_override": False,
+        },
+        "price_validation": {
+            "min_position_size": 0.001,
+            "max_position_size_ratio": 1.0,
+            "default_stop_loss_pct": 0.02,
+            "default_take_profit_pct": 0.04,
+        },
+    }
+
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f:
+                config = yaml.safe_load(f)
+                if config:
+                    # 合并配置，文件配置覆盖默认配置
+                    for key in default_config:
+                        if key in config:
+                            default_config[key].update(config[key])
+                    logger.info(f"已加载交易配置: {config_path}")
+                return default_config
+    except Exception as e:
+        logger.warning(f"加载配置文件失败，使用默认配置: {e}")
+
+    return default_config
 
 
 @dataclass
@@ -71,21 +113,29 @@ class EvidenceBasedRiskController:
 
     def __init__(
         self,
-        min_evidence_count: int = 2,
-        max_evidence_count: int = 10,
-        allow_veto_override: bool = False
+        min_evidence_count: Optional[int] = None,
+        max_evidence_count: Optional[int] = None,
+        allow_veto_override: Optional[bool] = None,
+        config: Optional[Dict[str, Any]] = None,
     ):
         """
         初始化证据链风控器
 
         Args:
-            min_evidence_count: 最小证据数量要求（默认 2）
-            max_evidence_count: 最大证据数量限制（默认 10）
-            allow_veto_override: 是否允许覆盖否决标记（默认 False）
+            min_evidence_count: 最小证据数量要求（默认从配置读取）
+            max_evidence_count: 最大证据数量限制（默认从配置读取）
+            allow_veto_override: 是否允许覆盖否决标记（默认从配置读取）
+            config: 可选的配置字典，覆盖从文件加载的配置
         """
-        self.min_evidence_count = min_evidence_count
-        self.max_evidence_count = max_evidence_count
-        self.allow_veto_override = allow_veto_override
+        # 加载配置（优先使用传入的 config，否则从文件加载）
+        loaded_config = config if config is not None else _load_config()
+        risk_config = loaded_config.get("risk_control", {})
+
+        # 设置参数（传入值 > 配置值 > 默认值）
+        self.min_evidence_count = min_evidence_count if min_evidence_count is not None else risk_config.get("min_evidence_count", 2)
+        self.max_evidence_count = max_evidence_count if max_evidence_count is not None else risk_config.get("max_evidence_count", 10)
+        self.allow_veto_override = allow_veto_override if allow_veto_override is not None else risk_config.get("allow_veto_override", False)
+
         self.stats = {
             'total_validated': 0,
             'passed': 0,
@@ -95,8 +145,9 @@ class EvidenceBasedRiskController:
 
         logger.info(
             f"EvidenceBasedRiskController 已初始化: "
-            f"min_evidence={min_evidence_count}, "
-            f"allow_veto_override={allow_veto_override}"
+            f"min_evidence={self.min_evidence_count}, "
+            f"max_evidence={self.max_evidence_count}, "
+            f"allow_veto_override={self.allow_veto_override}"
         )
 
     def validate(self, decision: EvidenceBasedDecision) -> Tuple[bool, str]:

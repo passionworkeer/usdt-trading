@@ -356,14 +356,8 @@ class OpenClawProvider(AIBaseProvider):
             logger.warning(f"OpenClaw 健康检查异常响应: {response_data}")
             return False
 
-        except OpenClawTimeoutError:
-            logger.error(f"OpenClaw 健康检查超时: {self.endpoint}")
-            return False
-        except OpenClawAPIError as e:
-            logger.error(f"OpenClaw 健康检查失败: {e.status_code} - {e}")
-            return False
-        except Exception as e:
-            logger.error(f"OpenClaw 健康检查异常: {e}")
+        except (OpenClawTimeoutError, aiohttp.ClientError, KeyError) as e:
+            logger.error(f"OpenClaw 健康检查失败: {type(e).__name__}: {e}")
             return False
 
     async def close(self) -> None:
@@ -383,5 +377,5 @@ class OpenClawProvider(AIBaseProvider):
                     loop.create_task(self._session.close())
                 else:
                     loop.run_until_complete(self._session.close())
-            except Exception:
+            except (asyncio.Error, RuntimeError):
                 pass  # 忽略关闭时的错误
