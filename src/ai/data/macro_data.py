@@ -9,7 +9,7 @@ from typing import Optional
 
 import aiohttp
 
-from .context import MacroMarketData
+from ..context import MacroMarketData
 
 logger = logging.getLogger(__name__)
 

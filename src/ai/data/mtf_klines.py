@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 import aiohttp
 import pandas as pd
 
-from .context import KLineData
+from ..context import KLineData
 
 logger = logging.getLogger(__name__)
 

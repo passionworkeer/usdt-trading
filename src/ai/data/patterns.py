@@ -8,7 +8,7 @@ from typing import List, Dict, Optional
 
 import pandas as pd
 
-from .context import CandlestickPattern, KLineData
+from ..context import CandlestickPattern, KLineData
 
 logger = logging.getLogger(__name__)
 
