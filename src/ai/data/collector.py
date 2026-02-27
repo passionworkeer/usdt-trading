@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -17,6 +18,9 @@ from .mtf_klines import MTFKlinesCollector
 from .patterns import PatternRecognizer
 
 logger = logging.getLogger(__name__)
+
+# 默认代理配置
+DEFAULT_PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY")
 
 
 class MarketDataCollector:
@@ -46,7 +50,12 @@ class MarketDataCollector:
         """确保 session 可用"""
         if self.session is None:
             timeout = aiohttp.ClientTimeout(total=30)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            # 配置代理
+            connector = None
+            if DEFAULT_PROXY:
+                connector = aiohttp.TCPConnector(local_addr=None, limit=100)
+                logger.info(f"使用代理: {DEFAULT_PROXY}")
+            self.session = aiohttp.ClientSession(timeout=timeout, connector=connector)
             self._owns_session = True
 
         if self._klines_collector is None:

@@ -4,6 +4,7 @@
 获取资金费率、OI、成交量、多空比等宏观数据。
 """
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -12,6 +13,9 @@ import aiohttp
 from ..context import MacroMarketData
 
 logger = logging.getLogger(__name__)
+
+# 代理配置
+PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY")
 
 
 class MacroDataFetcher:
@@ -111,7 +115,7 @@ class MacroDataFetcher:
         params = {'symbol': symbol}
 
         try:
-            async with self.session.get(url, params=params) as response:
+            async with self.session.get(url, params=params, proxy=PROXY) as response:
                 if response.status == 200:
                     return await response.json()
         except Exception as e:
@@ -125,7 +129,7 @@ class MacroDataFetcher:
         params = {'symbol': symbol}
 
         try:
-            async with self.session.get(url, params=params) as response:
+            async with self.session.get(url, params=params, proxy=PROXY) as response:
                 if response.status == 200:
                     return await response.json()
         except Exception as e:
@@ -143,7 +147,7 @@ class MacroDataFetcher:
         }
 
         try:
-            async with self.session.get(url, params=params) as response:
+            async with self.session.get(url, params=params, proxy=PROXY) as response:
                 if response.status == 200:
                     return await response.json()
         except Exception as e:
@@ -157,7 +161,7 @@ class MacroDataFetcher:
         params = {'symbol': symbol}
 
         try:
-            async with self.session.get(url, params=params) as response:
+            async with self.session.get(url, params=params, proxy=PROXY) as response:
                 if response.status == 200:
                     return await response.json()
         except Exception as e:
@@ -175,7 +179,7 @@ class MacroDataFetcher:
         }
 
         try:
-            async with self.session.get(url, params=params) as response:
+            async with self.session.get(url, params=params, proxy=PROXY) as response:
                 if response.status == 200:
                     data = await response.json()
                     if isinstance(data, list) and len(data) > 0:

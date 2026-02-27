@@ -4,6 +4,7 @@
 从 Binance 获取多时间周期的 K 线数据。
 """
 import logging
+import os
 from typing import Dict, List, Optional
 
 import aiohttp
@@ -22,6 +23,9 @@ KLINE_COLUMNS = [
     'close_time', 'quote_volume', 'trades', 'taker_buy_base',
     'taker_buy_quote', 'ignore'
 ]
+
+# 代理配置
+PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY")
 
 
 class MTFKlinesCollector:
@@ -61,7 +65,17 @@ class MTFKlinesCollector:
         }
 
         try:
-            async with self.session.get(self.base_url, params=params) as response:
+            # 构建请求参数
+            request_kwargs = {
+                'url': self.base_url,
+                'params': params,
+            }
+            # 添加代理支持
+            if PROXY:
+                request_kwargs['proxy'] = PROXY
+                logger.debug(f"使用代理: {PROXY}")
+
+            async with self.session.get(**request_kwargs) as response:
                 if response.status != 200:
                     logger.error(f"获取 {interval} K线失败: HTTP {response.status}")
                     return None
