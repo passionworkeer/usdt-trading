@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
-from src.ai.models import EvidenceBasedDecision, TradingSignal, TradeResult
+from src.ai.models import TradingSignal
+from src.ai.provider.base import EvidenceBasedDecision, TradeResult
 from src.ai.provider.manager import AIProviderManager
 from src.risk.evidence_controller import EvidenceBasedRiskController
 

@@ -89,7 +89,8 @@ def mock_signal_pool():
         timestamp=datetime.now(),
         signal_type=ActionType.BUY,
         strength=SignalStrength.STRONG,
-        confidence=0.85,
+        evidence_count=2,
+        evidence_chain=["证据1", "证据2"],
         source="test",
     )
     return MockSignalPool([signal])

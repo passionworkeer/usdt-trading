@@ -20,7 +20,8 @@ logger = logging.getLogger(__name__)
 class StrategyDecision:
     """策略决策结果"""
     action: ActionType
-    confidence: float
+    evidence_count: int
+    evidence_chain: List[str]
     reasoning: str
     selected_signals: List[TradingSignal]
     rejected_signals: List[TradingSignal]
@@ -33,7 +34,7 @@ class StrategyDecision:
         return (
             self.risk_validated and
             self.action != ActionType.PASS and
-            self.confidence > 0.5
+            self.evidence_count >= 2
         )
 
 

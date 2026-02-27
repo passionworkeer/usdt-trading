@@ -102,10 +102,26 @@ class MTFStrategyAdapter(BaseStrategy):
         else:
             action = ActionType.PASS
 
-        # 映射信号强度
-        if mtf_signal.confidence >= 0.9:
+        # 构建证据链
+        evidence_chain = []
+        if mtf_signal.is_locked:
+            evidence_chain.append(f"MTF三重共振锁定 (方向={'做多' if action == ActionType.BUY else '做空'})")
+        if mtf_signal.breakthrough_price:
+            evidence_chain.append(f"突破价格: {mtf_signal.breakthrough_price:.4f}")
+        if mtf_signal.breakthrough_vwap:
+            evidence_chain.append("VWAP突破确认")
+        if mtf_signal.reasons:
+            evidence_chain.extend(mtf_signal.reasons[:2])  # 最多取2个理由
+
+        # 如果没有证据链，返回 None
+        if not evidence_chain:
+            return None
+
+        # 根据实际证据数量确定 strength 和 evidence_count
+        evidence_count = len(evidence_chain)
+        if evidence_count >= 4:
             strength = SignalStrength.STRONG
-        elif mtf_signal.confidence >= 0.7:
+        elif evidence_count >= 2:
             strength = SignalStrength.MODERATE
         else:
             strength = SignalStrength.WEAK
@@ -118,6 +134,7 @@ class MTFStrategyAdapter(BaseStrategy):
             'breakthrough_vwap': mtf_signal.breakthrough_vwap,
             'suggested_entry_price': mtf_signal.suggested_entry_price,
             'wait_for_pullback': mtf_signal.wait_for_pullback,
+            'original_confidence': mtf_signal.confidence,  # 保留原始 confidence 用于调试
         }
 
         return TradingSignal(
@@ -125,7 +142,8 @@ class MTFStrategyAdapter(BaseStrategy):
             timestamp=mtf_signal.timestamp,
             signal_type=action,
             strength=strength,
-            confidence=mtf_signal.confidence,
+            evidence_count=evidence_count,
+            evidence_chain=evidence_chain,
             source=self._name,
             metadata=metadata
         )

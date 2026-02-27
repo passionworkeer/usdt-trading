@@ -211,19 +211,20 @@ class TestEvidenceBasedDecision:
         )
         assert decision.evidence_count == 2
 
-        # 证据数量不匹配
-        with pytest.raises(ValueError):
-            EvidenceBasedDecision(
-                action=ActionType.HOLD,
-                evidence_count=3,  # 错误：与列表长度不匹配
-                evidence_chain=["证据1", "证据2"],
-                veto_flag=False,
-                entry_price=50000.0,
-                stop_loss=49000.0,
-                take_profit=51000.0,
-                position_size=0.0,
-                reasoning="Test",
-            )
+        # 证据数量不匹配时自动修正（不抛出异常）
+        decision_mismatch = EvidenceBasedDecision(
+            action=ActionType.HOLD,
+            evidence_count=3,  # 错误：与列表长度不匹配
+            evidence_chain=["证据1", "证据2"],
+            veto_flag=False,
+            entry_price=50000.0,
+            stop_loss=49000.0,
+            take_profit=51000.0,
+            position_size=0.0,
+            reasoning="Test",
+        )
+        # 证据数量会被自动修正为 2
+        assert decision_mismatch.evidence_count == 2
 
     def test_to_dict(self):
         """测试转换为字典"""

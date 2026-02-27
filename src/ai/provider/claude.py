@@ -182,7 +182,7 @@ class ClaudeProvider(AIBaseProvider):
             )
             return len(response.content) > 0
 
-        except (anthropic.APIError, anthropic.APITimeoutError) as e:
+        except (anthropic.APIError, anthropic.APITimeoutError, Exception) as e:
             logger.warning(f"健康检查失败: {e}")
             return False
 

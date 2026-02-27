@@ -116,13 +116,15 @@ class MockAIProvider(AIBaseProvider):
 
         return EvidenceBasedDecision(
             action=action,
-            confidence=confidence,
+            evidence_count=len(evidence_chain.evidences),
+            evidence_chain=[e.description for e in evidence_chain.evidences],
+            veto_flag=False,
+            entry_price=context.current_price,
+            stop_loss=context.current_price * 0.98,  # 2% stop loss
+            take_profit=context.current_price * 1.05,  # 5% take profit
+            position_size=1000.0,
+            symbol=context.symbol,
             reasoning=f"基于 {context.symbol} 的技术分析和市场情绪",
-            evidence_chain=evidence_chain,
-            suggested_amount=1000.0,
-            stop_loss_pct=2.0,
-            take_profit_pct=5.0,
-            risk_level=RiskLevel.MEDIUM,
             metadata={"provider": self._name, "symbol": context.symbol},
         )
 
@@ -368,20 +370,20 @@ class TestCompleteTradingFlow:
 
         decision = await provider_manager.analyze(context)
         assert decision is not None
-        assert decision.confidence > 0
+        assert decision.evidence_count > 0
 
         # 4. 证据链风控验证
         # 转换 provider 决策格式到风控格式
         risk_decision = EvidenceBasedDecision(
             action=decision.action.value,
-            evidence_count=len(decision.evidence_chain.evidences),
-            evidence_chain=[e.description for e in decision.evidence_chain.evidences],
-            veto_flag=False,  # 从 metadata 获取或默认 False
-            entry_price=50000.0,
-            stop_loss=50000.0 * (1 - (decision.stop_loss_pct or 2.0) / 100),
-            take_profit=50000.0 * (1 + (decision.take_profit_pct or 5.0) / 100),
-            position_size=decision.suggested_amount or 1000.0,
-            symbol=context.symbol,
+            evidence_count=decision.evidence_count,
+            evidence_chain=decision.evidence_chain,
+            veto_flag=decision.veto_flag,
+            entry_price=decision.entry_price,
+            stop_loss=decision.stop_loss,
+            take_profit=decision.take_profit,
+            position_size=decision.position_size,
+            symbol=decision.symbol,
         )
 
         is_valid, reason = risk_controller.validate(risk_decision)
@@ -401,7 +403,7 @@ class TestCompleteTradingFlow:
             pnl=trade_result.pnl or 0.0,
             fee=0.0,
             strategy="integration_test",
-            signal_strength=decision.confidence,
+            signal_strength=decision.evidence_count / 5.0,  # Convert evidence count to strength
             execution_time_ms=100,
             metadata={"decision_metadata": decision.metadata},
         )

@@ -81,9 +81,10 @@ def test_import_trading_engine():
 def test_evidence_based_decision_creation():
     """测试证据链决策创建"""
     from src.risk.evidence_controller import EvidenceBasedDecision
+    from src.ai.provider.base import ActionType
 
     decision = EvidenceBasedDecision(
-        action="long",
+        action=ActionType.BUY,  # Use ActionType enum instead of string
         evidence_count=2,
         evidence_chain=["证据1", "证据2"],
         veto_flag=False,
@@ -92,7 +93,7 @@ def test_evidence_based_decision_creation():
         take_profit=110.0,
         position_size=10.0,
     )
-    assert decision.action == "long"
+    assert decision.action == ActionType.BUY
     assert decision.evidence_count == 2
     assert decision.veto_flag is False
 
@@ -100,12 +101,13 @@ def test_evidence_based_decision_creation():
 def test_risk_controller_validate():
     """测试风控验证逻辑"""
     from src.risk.evidence_controller import EvidenceBasedRiskController, EvidenceBasedDecision
+    from src.ai.provider.base import ActionType
 
     controller = EvidenceBasedRiskController(min_evidence_count=2)
 
     # 有效的决策
     valid_decision = EvidenceBasedDecision(
-        action="long",
+        action=ActionType.BUY,  # Use ActionType enum
         evidence_count=2,
         evidence_chain=["证据1", "证据2"],
         veto_flag=False,

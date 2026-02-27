@@ -118,6 +118,7 @@ class EvidenceBasedDecision:
         stop_loss: 止损价格
         take_profit: 止盈价格
         position_size: 仓位大小 (USDT)
+        symbol: 交易对 (可选)
         reasoning: 分析理由（可选）
         metadata: 额外元数据
         timestamp: 决策时间
@@ -130,19 +131,33 @@ class EvidenceBasedDecision:
     stop_loss: float
     take_profit: float
     position_size: float
+    symbol: Optional[str] = None
     reasoning: str = ""
     metadata: Dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
 
     def __post_init__(self):
-        """验证数据"""
+        """验证数据并自动修正"""
+        # Convert action string to ActionType enum if needed
+        if isinstance(self.action, str):
+            action_map = {
+                "buy": ActionType.BUY,
+                "long": ActionType.BUY,
+                "sell": ActionType.SELL,
+                "short": ActionType.SELL,
+                "hold": ActionType.HOLD,
+                "pass": ActionType.HOLD,
+                "close": ActionType.HOLD,  # close position is a form of hold/neutral
+            }
+            object.__setattr__(self, 'action', action_map.get(self.action.lower(), ActionType.HOLD))
+
+        # Auto-fix evidence_count to match evidence_chain length
+        if self.evidence_count != len(self.evidence_chain):
+            object.__setattr__(self, 'evidence_count', len(self.evidence_chain))
+
+        # Validate other fields
         if self.evidence_count < 0:
             raise ValueError(f"evidence_count must be non-negative, got {self.evidence_count}")
-        if self.evidence_count != len(self.evidence_chain):
-            raise ValueError(
-                f"evidence_count ({self.evidence_count}) must match "
-                f"evidence_chain length ({len(self.evidence_chain)})"
-            )
         if self.position_size < 0:
             raise ValueError(f"position_size must be non-negative, got {self.position_size}")
 
@@ -162,6 +177,7 @@ class EvidenceBasedDecision:
             'stop_loss': self.stop_loss,
             'take_profit': self.take_profit,
             'position_size': self.position_size,
+            'symbol': self.symbol,
             'reasoning': self.reasoning,
             'metadata': self.metadata,
             'timestamp': self.timestamp.isoformat() if isinstance(self.timestamp, datetime) else self.timestamp,
@@ -234,6 +250,7 @@ class ReviewReport:
     improvements: List[str] = field(default_factory=list)
     score: float = 0.0  # 0-100
     timestamp: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def add_finding(self, finding: ReviewFinding) -> None:
         """添加发现"""
@@ -258,6 +275,7 @@ class ReviewReport:
             'improvements': self.improvements,
             'score': self.score,
             'timestamp': self.timestamp.isoformat() if isinstance(self.timestamp, datetime) else self.timestamp,
+            'metadata': self.metadata,
         }
 
 

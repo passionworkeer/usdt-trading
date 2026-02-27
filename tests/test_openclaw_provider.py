@@ -18,9 +18,11 @@ import pytest
 from src.ai.provider.base import (
     ActionType,
     Evidence,
+    EvidenceBasedDecision,
     EvidenceChain,
     MarketContext,
     RiskLevel,
+    TradeResult,
 )
 from src.ai.provider.openclaw import (
     OpenClawAPIError,
@@ -360,13 +362,18 @@ class TestOpenClawProviderMakeRequest:
         provider = OpenClawProvider(endpoint="http://localhost:8080")
         provider._initialized = True
 
-        # Mock session 和 response
+        # Mock response
         mock_response = AsyncMock()
         mock_response.json = AsyncMock(return_value={"result": "success"})
         mock_response.status = 200
 
+        # Mock session.request to return an async context manager
+        mock_request_cm = AsyncMock()
+        mock_request_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_request_cm.__aexit__ = AsyncMock(return_value=None)
+
         mock_session = AsyncMock()
-        mock_session.request = AsyncMock(return_value=mock_response)
+        mock_session.request = MagicMock(return_value=mock_request_cm)
         mock_session.closed = False
 
         provider._session = mock_session
@@ -382,12 +389,18 @@ class TestOpenClawProviderMakeRequest:
         provider = OpenClawProvider(endpoint="http://localhost:8080")
         provider._initialized = True
 
+        # Mock response
         mock_response = AsyncMock()
         mock_response.json = AsyncMock(return_value={"error": "Internal Server Error"})
         mock_response.status = 500
 
+        # Mock session.request to return an async context manager
+        mock_request_cm = AsyncMock()
+        mock_request_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_request_cm.__aexit__ = AsyncMock(return_value=None)
+
         mock_session = AsyncMock()
-        mock_session.request = AsyncMock(return_value=mock_response)
+        mock_session.request = MagicMock(return_value=mock_request_cm)
         mock_session.closed = False
 
         provider._session = mock_session
@@ -404,8 +417,13 @@ class TestOpenClawProviderMakeRequest:
         provider = OpenClawProvider(endpoint="http://localhost:8080")
         provider._initialized = True
 
+        # Mock session.request to raise TimeoutError in __aenter__
+        mock_request_cm = AsyncMock()
+        mock_request_cm.__aenter__ = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_request_cm.__aexit__ = AsyncMock(return_value=None)
+
         mock_session = AsyncMock()
-        mock_session.request = AsyncMock(side_effect=asyncio.TimeoutError())
+        mock_session.request = MagicMock(return_value=mock_request_cm)
         mock_session.closed = False
 
         provider._session = mock_session
@@ -419,10 +437,15 @@ class TestOpenClawProviderMakeRequest:
         provider = OpenClawProvider(endpoint="http://localhost:8080")
         provider._initialized = True
 
-        mock_session = AsyncMock()
-        mock_session.request = AsyncMock(
+        # Mock session.request to raise ClientError in __aenter__
+        mock_request_cm = AsyncMock()
+        mock_request_cm.__aenter__ = AsyncMock(
             side_effect=aiohttp.ClientError("Connection refused")
         )
+        mock_request_cm.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session = AsyncMock()
+        mock_session.request = MagicMock(return_value=mock_request_cm)
         mock_session.closed = False
 
         provider._session = mock_session

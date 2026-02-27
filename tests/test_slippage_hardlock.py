@@ -23,15 +23,15 @@ class TestSlippageHardlock:
         """测试初始化 - 默认参数"""
         hardlock = SlippageHardlock()
 
-        assert hardlock.threshold_pct == 0.5
+        assert hardlock.base_threshold_pct == 0.5
         assert hardlock.timeout_sec == 5.0
         assert hardlock._locked_prices == {}
 
     def test_init_custom(self):
         """测试初始化 - 自定义参数"""
-        hardlock = SlippageHardlock(threshold_pct=1.0, timeout_sec=10.0)
+        hardlock = SlippageHardlock(base_threshold_pct=1.0, timeout_sec=10.0)
 
-        assert hardlock.threshold_pct == 1.0
+        assert hardlock.base_threshold_pct == 1.0
         assert hardlock.timeout_sec == 10.0
 
     # ==================== lock_trigger_price 测试 ====================
@@ -80,7 +80,7 @@ class TestSlippageHardlock:
 
     def test_check_slippage_pass(self):
         """测试检查滑点 - 通过"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
 
@@ -93,7 +93,7 @@ class TestSlippageHardlock:
 
     def test_check_slippage_fail(self):
         """测试检查滑点 - 失败"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
 
@@ -119,7 +119,7 @@ class TestSlippageHardlock:
 
     def test_check_slippage_direction_up(self):
         """测试检查滑点 - 方向向上"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
 
@@ -129,7 +129,7 @@ class TestSlippageHardlock:
 
     def test_check_slippage_direction_down(self):
         """测试检查滑点 - 方向向下"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
 
@@ -139,7 +139,7 @@ class TestSlippageHardlock:
 
     def test_check_slippage_cleanup_after_check(self):
         """测试检查滑点 - 检查后清理"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
         hardlock.check_slippage('BTCUSDT', 50050.0)
@@ -149,7 +149,7 @@ class TestSlippageHardlock:
 
     def test_check_slippage_cleanup_after_failure(self):
         """测试检查滑点 - 失败后清理"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
         hardlock.check_slippage('BTCUSDT', 51000.0)
@@ -241,12 +241,12 @@ class TestSlippageHardlock:
 
     def test_get_stats_basic(self):
         """测试获取统计信息 - 基本"""
-        hardlock = SlippageHardlock(threshold_pct=0.8, timeout_sec=10.0)
+        hardlock = SlippageHardlock(base_threshold_pct=0.8, timeout_sec=10.0)
 
         stats = hardlock.get_stats()
 
         assert stats['locked_count'] == 0
-        assert stats['threshold_pct'] == 0.8
+        assert stats['base_threshold_pct'] == 0.8
         assert stats['timeout_sec'] == 10.0
 
     def test_get_stats_with_locks(self):
@@ -264,7 +264,7 @@ class TestSlippageHardlock:
 
     def test_slippage_exact_threshold(self):
         """测试滑点 - 恰好等于阈值"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
 
@@ -287,7 +287,7 @@ class TestSlippageHardlock:
 
     def test_slippage_very_small_price_change(self):
         """测试滑点 - 极小价格变化"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
 
@@ -345,7 +345,7 @@ class TestSlippageHardlock:
 
     def test_multiple_consecutive_checks(self):
         """测试连续检查"""
-        hardlock = SlippageHardlock(threshold_pct=0.5)
+        hardlock = SlippageHardlock(base_threshold_pct=0.5)
 
         hardlock.lock_trigger_price('BTCUSDT', 50000.0)
 

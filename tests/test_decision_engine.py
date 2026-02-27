@@ -188,14 +188,14 @@ class TestClaudeDecisionEngine:
         # 只测试 api_key 被正确设置
         engine = ClaudeDecisionEngine(api_key='test_key')
 
-        assert engine.api_key == 'test_key'
+        assert engine._api_key == 'test_key'
 
     @patch.dict('os.environ', {}, clear=True)
     def test_init_without_api_key(self):
         """测试初始化 - 无 API Key"""
         engine = ClaudeDecisionEngine()
 
-        assert engine.api_key is None
+        assert engine._api_key is None
         assert engine.client is None
 
     @patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'env_key'}, clear=False)
@@ -207,7 +207,7 @@ class TestClaudeDecisionEngine:
 
         # 如果 anthropic 库可用，应该读取环境变量
         # 否则只测试 api_key 被正确读取
-        assert engine.api_key == 'env_key'
+        assert engine._api_key == 'env_key'
 
     # ==================== _build_analysis_prompt 测试 ====================
 

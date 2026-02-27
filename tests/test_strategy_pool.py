@@ -5,6 +5,7 @@ import asyncio
 import pytest
 from datetime import datetime
 from typing import Optional, List, Dict, Any
+from unittest.mock import AsyncMock, Mock, patch
 
 from src.ai.models import TradingSignal, ActionType, SignalStrength
 from src.ai.provider.base import MarketContext, EvidenceBasedDecision
@@ -55,7 +56,8 @@ def sample_signal():
         timestamp=datetime.now(),
         signal_type=ActionType.BUY,
         strength=SignalStrength.STRONG,
-        confidence=0.85,
+        evidence_count=3,
+        evidence_chain=["技术指标支持", "趋势确认", "成交量放大"],
         source="TestStrategy",
         metadata={"reason": "test"},
     )
@@ -103,7 +105,8 @@ class MockStrategy(BaseStrategy):
                 timestamp=datetime.now(),
                 signal_type=self.signal_to_return.signal_type,
                 strength=self.signal_to_return.strength,
-                confidence=self.signal_to_return.confidence,
+                evidence_count=self.signal_to_return.evidence_count,
+                evidence_chain=self.signal_to_return.evidence_chain,
                 source=self.name,
                 metadata={
                     **self.signal_to_return.metadata,
@@ -195,7 +198,8 @@ class TestSignalPool:
             timestamp=datetime.now(),
             signal_type=ActionType.BUY,
             strength=SignalStrength.STRONG,
-            confidence=0.9,
+            evidence_count=5,
+            evidence_chain=["信号1", "信号2", "信号3", "信号4", "信号5"],
             source="Test",
         )
 
@@ -212,7 +216,7 @@ class TestSignalPool:
 
         assert len(signals) == 1
         assert signals[0].source == "TestStrategy"
-        assert signals[0].confidence == 0.9
+        assert signals[0].evidence_count == 5
 
     @pytest.mark.asyncio
     async def test_collect_signals_with_failure(self, signal_pool, sample_market_data):
@@ -229,7 +233,8 @@ class TestSignalPool:
             timestamp=datetime.now(),
             signal_type=ActionType.BUY,
             strength=SignalStrength.MODERATE,
-            confidence=0.75,
+            evidence_count=3,
+            evidence_chain=["证据1", "证据2", "证据3"],
             source="Test",
         )
         success_strategy = MockStrategy(
@@ -254,7 +259,8 @@ class TestSignalPool:
             timestamp=datetime.now(),
             signal_type=ActionType.BUY,
             strength=SignalStrength.WEAK,
-            confidence=0.5,
+            evidence_count=1,
+            evidence_chain=["证据1"],
             source="Test",
         )
 
@@ -263,7 +269,8 @@ class TestSignalPool:
             timestamp=datetime.now(),
             signal_type=ActionType.BUY,
             strength=SignalStrength.STRONG,
-            confidence=0.95,
+            evidence_count=5,
+            evidence_chain=["证据1", "证据2", "证据3", "证据4", "证据5"],
             source="Test",
         )
 
@@ -272,7 +279,8 @@ class TestSignalPool:
             timestamp=datetime.now(),
             signal_type=ActionType.BUY,
             strength=SignalStrength.MODERATE,
-            confidence=0.75,
+            evidence_count=3,
+            evidence_chain=["证据1", "证据2", "证据3"],
             source="Test",
         )
 
@@ -368,20 +376,18 @@ class TestStrategySelector:
         # 设置模拟决策
         mock_decision = EvidenceBasedDecision(
             action=ActionType.BUY,
-            confidence=0.8,
-            reasoning="Test reasoning",
-            evidence_chain=["evidence1", "evidence2"],
+            evidence_count=2,
+            evidence_chain=["技术指标支持", "趋势确认"],
             veto_flag=False,
             entry_price=50000.0,
             stop_loss=48000.0,
             take_profit=55000.0,
             position_size=0.1,
-            symbol="BTC/USDT",
-            evidence_count=2,
+            reasoning="Test reasoning",
         )
 
         mock_provider = mock_provider_manager.get_active.return_value
-        mock_provider.analyze = lambda x: mock_decision
+        mock_provider.analyze = AsyncMock(return_value=mock_decision)
 
         signals = [sample_signal]
 
@@ -410,20 +416,18 @@ class TestStrategySelector:
         # 设置模拟决策
         mock_decision = EvidenceBasedDecision(
             action=ActionType.BUY,
-            confidence=0.8,
-            reasoning="Test reasoning",
-            evidence_chain=["evidence1"],
+            evidence_count=1,
+            evidence_chain=["证据1"],
             veto_flag=False,
             entry_price=50000.0,
             stop_loss=48000.0,
             take_profit=55000.0,
             position_size=0.1,
-            symbol="BTC/USDT",
-            evidence_count=1,
+            reasoning="Test reasoning",
         )
 
         mock_provider = mock_provider_manager.get_active.return_value
-        mock_provider.analyze = lambda x: mock_decision
+        mock_provider.analyze = AsyncMock(return_value=mock_decision)
 
         signals = [sample_signal]
 
@@ -441,20 +445,18 @@ class TestStrategySelector:
         sample_signal,
         sample_market_context,
     ):
-        """测试置信度过低的情况"""
+        """测试证据数量过低的情况"""
         # 设置模拟决策（低证据数量）
         mock_decision = EvidenceBasedDecision(
             action=ActionType.BUY,
-            confidence=0.5,  # Deprecated field, kept for compatibility
-            reasoning="Test reasoning",
-            evidence_chain=["evidence1"],
+            evidence_count=1,  # 低于 min_evidence_count=2
+            evidence_chain=["证据1"],
             veto_flag=False,
             entry_price=50000.0,
             stop_loss=48000.0,
             take_profit=55000.0,
             position_size=0.1,
-            symbol="BTC/USDT",
-            evidence_count=1,  # 低于 min_evidence_count=2
+            reasoning="Test reasoning",
         )
 
         mock_provider = mock_provider_manager.get_active.return_value
@@ -550,10 +552,11 @@ class TestMTFStrategyAdapter:
         assert trading_signal.symbol == "BTC/USDT"
         assert trading_signal.signal_type == ActionType.BUY
         assert trading_signal.strength == SignalStrength.STRONG
-        assert trading_signal.confidence == 0.95
+        assert trading_signal.evidence_count > 0
         assert trading_signal.source == "MTFResonanceLock"
         assert trading_signal.metadata['mtf_is_locked'] is True
         assert trading_signal.metadata['suggested_entry_price'] == 49800.0
+        assert 'original_confidence' in trading_signal.metadata
 
     def test_convert_mtf_signal_sell(self):
         """测试做空信号转换"""
@@ -568,12 +571,17 @@ class TestMTFStrategyAdapter:
             reasons=["4H 趋势向下", "费率极端", "15m 放量"],
             timestamp=datetime.now(),
             is_locked=True,
+            breakthrough_price=50000.0,
+            breakthrough_vwap=49000.0,
         )
 
         trading_signal = adapter._convert_mtf_signal(mtf_signal)
 
+        # Strength is determined by evidence_count, not confidence
+        # With is_locked + reasons + breakthrough_price + vwap = 4 evidences → STRONG
         assert trading_signal.signal_type == ActionType.SELL
         assert trading_signal.strength == SignalStrength.STRONG
+        assert trading_signal.evidence_count > 0
 
     def test_convert_mtf_signal_low_confidence(self):
         """测试低置信度信号转换"""
@@ -592,7 +600,11 @@ class TestMTFStrategyAdapter:
 
         trading_signal = adapter._convert_mtf_signal(mtf_signal)
 
-        assert trading_signal.strength == SignalStrength.WEAK
+        # Strength is determined by evidence_count (2: is_locked + reason)
+        # 2 evidences → MODERATE (not based on confidence)
+        assert trading_signal.strength == SignalStrength.MODERATE
+        # 低置信度应该产生较低的证据数量
+        assert trading_signal.evidence_count <= 2
 
 
 # ============================================================================
@@ -632,7 +644,8 @@ class TestIntegration:
             timestamp=datetime.now(),
             signal_type=ActionType.BUY,
             strength=SignalStrength.STRONG,
-            confidence=0.9,
+            evidence_count=5,
+            evidence_chain=["证据1", "证据2", "证据3", "证据4", "证据5"],
             source="Test",
         )
 
@@ -641,7 +654,8 @@ class TestIntegration:
             timestamp=datetime.now(),
             signal_type=ActionType.SELL,
             strength=SignalStrength.MODERATE,
-            confidence=0.75,
+            evidence_count=3,
+            evidence_chain=["证据1", "证据2", "证据3"],
             source="Test",
         )
 

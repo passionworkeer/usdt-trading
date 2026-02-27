@@ -117,7 +117,8 @@ class BaseStrategy(ABC):
         symbol: str,
         action: ActionType,
         strength: SignalStrength,
-        confidence: float,
+        evidence_count: int,
+        evidence_chain: List[str],
         metadata: Optional[Dict[str, Any]] = None
     ) -> TradingSignal:
         """创建交易信号"""
@@ -126,7 +127,8 @@ class BaseStrategy(ABC):
             timestamp=datetime.now(),
             signal_type=action,
             strength=strength,
-            confidence=confidence,
+            evidence_count=evidence_count,
+            evidence_chain=evidence_chain,
             source=self._name,
             metadata=metadata or {}
         )
@@ -269,14 +271,14 @@ class SignalPool:
             if signal is not None:
                 signals.append(signal)
 
-        # 按信号强度排序（强 > 中 > 弱）
+        # 按信号强度排序（强 > 中 > 弱），然后按证据数量
         strength_order = {
             SignalStrength.STRONG: 3,
             SignalStrength.MODERATE: 2,
             SignalStrength.WEAK: 1,
         }
         signals.sort(
-            key=lambda x: (strength_order.get(x.strength, 0), x.confidence),
+            key=lambda x: (strength_order.get(x.strength, 0), x.evidence_count),
             reverse=True
         )
 

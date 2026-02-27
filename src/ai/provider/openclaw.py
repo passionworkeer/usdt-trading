@@ -75,9 +75,8 @@ class OpenClawProvider(AIBaseProvider):
         self.endpoint = endpoint.rstrip("/")
 
         # 优先使用环境变量，支持密钥验证和日志脱敏
-        self._api_key = api_key or config.get("api_key") or os.environ.get("OPENCLAW_API_KEY")
-        if not self._api_key:
-            raise ValueError("API Key must be provided via parameter, config, or OPENCLAW_API_KEY env var")
+        # api_key is optional - some OpenClaw endpoints may not require it
+        self._api_key = api_key or (config.get("api_key") if config else None) or os.environ.get("OPENCLAW_API_KEY")
 
         self.api_key = self._api_key
         self.timeout = timeout
@@ -200,6 +199,7 @@ class OpenClawProvider(AIBaseProvider):
         Raises:
             OpenClawAPIError: API 调用错误
             OpenClawTimeoutError: 超时错误
+            OpenClawProviderError: Provider 未初始化
         """
         if not self.is_initialized:
             raise OpenClawProviderError("Provider 未初始化，请先调用 initialize()")
@@ -223,7 +223,10 @@ class OpenClawProvider(AIBaseProvider):
 
             return decision
 
-        except (OpenClawTimeoutError, aiohttp.ClientError, asyncio.TimeoutError) as e:
+        except OpenClawTimeoutError:
+            # 超时错误直接传播，不包装
+            raise
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"OpenClaw 分析失败: {type(e).__name__}: {e}")
             raise OpenClawAPIError(f"分析失败: {str(e)}") from e
 
@@ -279,6 +282,11 @@ class OpenClawProvider(AIBaseProvider):
         except (ValueError, TypeError):
             position_size = 0.0
 
+        # 构建元数据 - 合并顶层字段和 metadata 字段
+        metadata = dict(data.get("metadata", {}))
+        if "risk_level" in data:
+            metadata["risk_level"] = data["risk_level"]
+
         # 构建决策对象
         decision = EvidenceBasedDecision(
             action=action,
@@ -290,7 +298,7 @@ class OpenClawProvider(AIBaseProvider):
             take_profit=take_profit,
             position_size=position_size,
             reasoning=data.get("reasoning", ""),
-            metadata=data.get("metadata", {}),
+            metadata=metadata,
         )
 
         return decision
@@ -356,7 +364,7 @@ class OpenClawProvider(AIBaseProvider):
             logger.warning(f"OpenClaw 健康检查异常响应: {response_data}")
             return False
 
-        except (OpenClawTimeoutError, aiohttp.ClientError, KeyError) as e:
+        except (OpenClawTimeoutError, OpenClawAPIError, aiohttp.ClientError, KeyError) as e:
             logger.error(f"OpenClaw 健康检查失败: {type(e).__name__}: {e}")
             return False
 

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from src.ai.provider.base import ActionType
+from src.ai.provider.base import ActionType, EvidenceBasedDecision
 
 logger = logging.getLogger(__name__)
 
@@ -52,44 +52,6 @@ def _load_config() -> Dict[str, Any]:
         logger.warning(f"加载配置文件失败，使用默认配置: {e}")
 
     return default_config
-
-
-@dataclass
-class EvidenceBasedDecision:
-    """
-    基于证据的决策数据类
-
-    Attributes:
-        action: 交易动作 (long/short/close/hold)
-        evidence_count: 证据数量
-        evidence_chain: 证据链列表，每项是一个证据描述
-        veto_flag: 否决标记，True 表示存在否决条件
-        entry_price: 入场价格
-        stop_loss: 止损价格
-        take_profit: 止盈价格
-        position_size: 仓位大小
-        symbol: 交易对 (可选)
-        metadata: 额外元数据 (可选)
-    """
-    action: str
-    evidence_count: int
-    evidence_chain: List[str]
-    veto_flag: bool
-    entry_price: float
-    stop_loss: float
-    take_profit: float
-    position_size: float
-    symbol: Optional[str] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self):
-        """验证数据一致性"""
-        if self.evidence_count != len(self.evidence_chain):
-            logger.warning(
-                f"证据数量不匹配: evidence_count={self.evidence_count}, "
-                f"实际证据链长度={len(self.evidence_chain)}"
-            )
-            self.evidence_count = len(self.evidence_chain)
 
 
 @dataclass

@@ -125,6 +125,9 @@ class ReviewSystem:
         provider = self.provider_manager.get_active()
         report = await provider.review(trade_result)
 
+        # 确保报告的 trade_id 与请求的 order_id 一致
+        report.trade_id = order_id
+
         # 保存复盘报告到数据库
         review_record = Review(
             trade_id=trade_id,
@@ -204,12 +207,11 @@ class ReviewSystem:
 
         async with aiosqlite.connect(self.database.db_path) as db:
             cursor = await db.execute(
-                """
+                f"""
                 SELECT DISTINCT strategy FROM trades
-                WHERE created_at >= datetime('now', '-? days')
+                WHERE created_at >= datetime('now', '-{days} days')
                 AND strategy IS NOT NULL AND strategy != ''
-                """,
-                (days,)
+                """
             )
             rows = await cursor.fetchall()
             return [row[0] for row in rows if row[0]]
