@@ -209,18 +209,12 @@ class MTFResonanceLock:
         funding_url = "https://fapi.binance.com/fapi/v1/premiumIndex"
         funding_params = {'symbol': symbol.replace('/', '')}
 
-        # 2. 获取当前 OI
+        # 2. 获取当前 OI（v5.2 修复：openInterestHist 已废弃，改用当前 OI）
         oi_url = "https://fapi.binance.com/fapi/v1/openInterest"
         oi_params = {'symbol': symbol.replace('/', '')}
 
-        # 3. 获取历史 OI（1 小时前）
-        # 使用 /fapi/v1/openInterestHist 获取历史 OI
-        oi_hist_url = "https://fapi.binance.com/fapi/v1/openInterestHist"
-        oi_hist_params = {
-            'symbol': symbol.replace('/', ''),
-            'period': '5m',  # 5 分钟粒度
-            'limit': 12,  # 获取最近 12 个点（1 小时）
-        }
+        # 3. 历史 OI 接口已废弃（fapi/v1/openInterestHist 返回 404）
+        # 简化逻辑：使用当前 OI + 资金费率判断，不依赖 ΔOI
 
         try:
             # 并发请求
@@ -230,9 +224,6 @@ class MTFResonanceLock:
             async with session.get(oi_url, params=oi_params) as oi_resp:
                 oi_data = await oi_resp.json()
 
-            async with session.get(oi_hist_url, params=oi_hist_params) as oi_hist_resp:
-                oi_hist_data = await oi_hist_resp.json()
-
             # 解析资金费率
             funding_rate = float(funding_data.get('lastFundingRate', 0))
             mark_price = float(funding_data.get('markPrice', 0))
@@ -240,52 +231,25 @@ class MTFResonanceLock:
             # 解析当前 OI
             current_oi = float(oi_data.get('openInterest', 0))
 
-            # 解析历史 OI（1 小时前）
-            if isinstance(oi_hist_data, list) and len(oi_hist_data) >= 12:
-                # 取第一个点（1 小时前）
-                oi_1h_ago = float(oi_hist_data[0].get('openInterest', 0))
-
-                # 计算 ΔOI（变化率）
-                delta_oi = (current_oi - oi_1h_ago) / oi_1h_ago if oi_1h_ago > 0 else 0
-            else:
-                # 如果无法获取历史数据，降级为 0
-                logger.warning(f"无法获取 {symbol} 历史 OI 数据，ΔOI 降级为 0")
-                delta_oi = 0
-                oi_1h_ago = 0
-
             # 存储缓存
             self.funding_rates[symbol] = funding_rate
             self.open_interests[symbol] = current_oi
 
-            # 判断极端偏离 + OI 激增
+            # 判断极端资金费率（简化版：只用费率，不依赖 ΔOI）
             signal = 0
             reason = ""
 
             if funding_rate > 0.0005:  # 0.05% 极度正费率
-                if delta_oi > 0.05:  # ΔOI 激增 > 5%
-                    signal = -1  # 做空信号
-                    reason = (f"极度正费率: {funding_rate:.4%} + ΔOI 激增: {delta_oi:.2%} "
-                             f"(当前 OI: {current_oi:,.0f}, 1h 前: {oi_1h_ago:,.0f}) "
-                             f"→ 多头过度拥挤，做空信号")
-                else:
-                    signal = 0  # 信号不成立
-                    reason = f"正费率: {funding_rate:.4%} 但 ΔOI 仅 {delta_oi:.2%}（未达 5% 阈值）→ 无信号"
-
+                signal = -1  # 做空信号（多头付钱=过度拥挤）
+                reason = f"极度正费率: {funding_rate:.4%} → 多头过度拥挤，做空信号"
             elif funding_rate < -0.0005:  # -0.05% 极度负费率
-                if delta_oi > 0.05:  # ΔOI 激增 > 5%
-                    signal = 1  # 做多信号
-                    reason = (f"极度负费率: {funding_rate:.4%} + ΔOI 激增: {delta_oi:.2%} "
-                             f"(当前 OI: {current_oi:,.0f}, 1h 前: {oi_1h_ago:,.0f}) "
-                             f"→ 空头过度拥挤，做多信号")
-                else:
-                    signal = 0  # 信号不成立
-                    reason = f"负费率: {funding_rate:.4%} 但 ΔOI 仅 {delta_oi:.2%}（未达 5% 阈值）→ 无信号"
-
+                signal = 1  # 做多信号（空头付钱=过度拥挤）
+                reason = f"极度负费率: {funding_rate:.4%} → 空头过度拥挤，做多信号"
             else:
                 signal = 0
                 reason = f"费率正常: {funding_rate:.4%}，无极端偏离"
 
-            logger.info(f"【资金费率/ΔOI】{symbol}: {reason}")
+            logger.info(f"【资金费率】{symbol}: {reason}")
 
             return signal, reason
 
