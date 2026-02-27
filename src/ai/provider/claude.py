@@ -3,11 +3,12 @@ Claude AI Provider
 
 实现基于 Anthropic Claude API 的 AI Provider。
 支持证据链分析和结构化决策输出。
+支持增强的市场数据（多时间框架、技术指标、K线形态）。
 """
 import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import anthropic
 
@@ -20,6 +21,14 @@ from .base import (
     ActionType,
     ReviewFinding,
 )
+
+# 导入增强的数据结构
+try:
+    from ..context import AIAnalysisContext
+    HAS_ENHANCED_CONTEXT = True
+except ImportError:
+    AIAnalysisContext = None
+    HAS_ENHANCED_CONTEXT = False
 
 
 logger = logging.getLogger(__name__)
@@ -92,9 +101,13 @@ class ClaudeProvider(AIBaseProvider):
             self._set_error(f"初始化失败: {str(e)}")
             return False
 
-    async def analyze(self, context: MarketContext) -> EvidenceBasedDecision:
+    async def analyze(self, context: Union[MarketContext, 'AIAnalysisContext']) -> EvidenceBasedDecision:
         """
         分析市场并返回基于证据的决策
+
+        支持两种上下文:
+        - MarketContext: 传统简单上下文
+        - AIAnalysisContext: 增强上下文（多时间框架、指标、形态）
 
         Args:
             context: 市场上下文数据
@@ -109,7 +122,12 @@ class ClaudeProvider(AIBaseProvider):
             raise RuntimeError("Provider 未初始化")
 
         try:
-            prompt = self._build_analysis_prompt(context)
+            # 判断上下文类型并构建相应的 prompt
+            if HAS_ENHANCED_CONTEXT and isinstance(context, AIAnalysisContext):
+                prompt = self._build_enhanced_analysis_prompt(context)
+            else:
+                prompt = self._build_analysis_prompt(context)
+
             response = await self._client.messages.create(
                 model=self._model,
                 max_tokens=MAX_TOKENS,
@@ -198,6 +216,71 @@ class ClaudeProvider(AIBaseProvider):
         }
 
     # ==================== 私有方法 ====================
+
+    def _build_enhanced_analysis_prompt(self, context: 'AIAnalysisContext') -> str:
+        """
+        构建增强版分析提示词（使用多时间框架、技术指标、K线形态）
+
+        Args:
+            context: 增强的市场上下文
+
+        Returns:
+            提示词字符串
+        """
+        market_data_str = context.to_prompt_data()
+
+        return f"""你是一个专业的加密货币交易分析师。请基于以下完整的市场数据进行深度分析并给出交易决策。
+
+{market_data_str}
+
+## 分析要求
+
+请按照以下 JSON 格式输出你的分析和决策：
+
+```json
+{{
+  "action": "buy|sell|hold",
+  "evidence_count": 3,
+  "evidence_chain": [
+    "证据1: 具体的可验证的市场现象，如 '15分钟RSI 低于30，处于超卖区域'",
+    "证据2: 具体的可验证的市场现象，如 '4小时价格突破EMA50均线'",
+    "证据3: 具体的可验证的市场现象，如 '成交量放大2倍以上'"
+  ],
+  "veto_flag": false,
+  "veto_reason": "如果 veto_flag 为 true，说明否决原因",
+  "entry_price": 建议入场价格,
+  "stop_loss": 止损价格,
+  "take_profit": 止盈价格,
+  "position_size": 建议仓位大小(USDT),
+  "reasoning": "主要分析理由的简短总结"
+}}
+```
+
+### 证据链要求（重要！）：
+1. **必须至少提供 2 条证据**，否则交易会被风控拒绝
+2. 每条证据必须是**具体、可验证**的市场现象，需要注明时间周期（如15分钟、4小时）
+3. 多时间框架分析是核心优势，请充分利用不同周期的数据
+4. 如果市场存在任何**危险信号**（如资金费率极端、OI激增、异常波动），必须设置 `veto_flag = true`
+5. 如果无法找到 2 个以上具体证据，直接返回 `action: "hold"`
+
+### 决策标准：
+- `action`: buy（做多）、sell（做空）或 hold（观望）
+- `evidence_count`: 必须与 evidence_chain 数组长度一致
+- `veto_flag`: 存在危险信号时设为 true，阻止交易
+- `entry_price`, `stop_loss`, `take_profit`: 具体价格数值
+- `position_size`: 建议仓位大小（USDT）
+
+### 价格逻辑：
+- 做多: stop_loss < entry_price < take_profit
+- 做空: take_profit < entry_price < stop_loss
+
+### 多时间框架分析要点：
+1. **15分钟**: 精准入场点、短期动量、成交量确认
+2. **4小时**: 中期趋势方向、关键支撑阻力
+3. **1天**: 长期趋势背景、大方向判断
+
+请直接输出 JSON，不要包含其他解释。
+"""
 
     def _build_analysis_prompt(self, context: MarketContext) -> str:
         """
@@ -342,7 +425,7 @@ class ClaudeProvider(AIBaseProvider):
     def _parse_analysis_response(
         self,
         response_text: str,
-        context: MarketContext,
+        context: Union[MarketContext, 'AIAnalysisContext'],
     ) -> EvidenceBasedDecision:
         """
         解析分析响应
@@ -376,11 +459,26 @@ class ClaudeProvider(AIBaseProvider):
             # 解析 veto_flag
             veto_flag = bool(data.get("veto_flag", False))
 
+            # 获取当前价格（兼容两种上下文）
+            if HAS_ENHANCED_CONTEXT and isinstance(context, AIAnalysisContext):
+                current_price = context.klines.get('15m', context.klines.get('1h'))
+                if current_price:
+                    current_price = current_price.current_price
+                else:
+                    # 从第一个可用的 kline 获取
+                    for kline in context.klines.values():
+                        current_price = kline.current_price
+                        break
+                symbol = context.symbol
+            else:
+                current_price = context.current_price
+                symbol = context.symbol
+
             # 解析价格参数 - 添加类型转换安全
             try:
-                entry_price = float(data.get("entry_price", context.current_price))
+                entry_price = float(data.get("entry_price", current_price))
             except (ValueError, TypeError):
-                entry_price = float(context.current_price)
+                entry_price = float(current_price)
 
             try:
                 stop_loss = float(data.get("stop_loss", entry_price * 0.98))
@@ -406,11 +504,13 @@ class ClaudeProvider(AIBaseProvider):
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 position_size=position_size,
+                symbol=symbol,
                 reasoning=data.get("reasoning", "无分析理由"),
                 metadata={
                     "model": self._model,
-                    "symbol": context.symbol,
+                    "symbol": symbol,
                     "raw_response": response_text[:500],  # 保留部分原始响应
+                    "enhanced_context": HAS_ENHANCED_CONTEXT and isinstance(context, AIAnalysisContext),
                 },
             )
 
@@ -538,32 +638,46 @@ class ClaudeProvider(AIBaseProvider):
 
     def _create_fallback_decision(
         self,
-        context: MarketContext,
+        context: Union[MarketContext, 'AIAnalysisContext'],
         error: str,
     ) -> EvidenceBasedDecision:
         """
         创建后备决策（当解析失败时）
 
         Args:
-            context: 市场上下文
+            context: 市场上下文（支持两种类型）
             error: 错误信息
 
         Returns:
             保守的默认决策（veto_flag=True，阻止交易）
         """
+        # 获取当前价格和交易对（兼容两种上下文）
+        if HAS_ENHANCED_CONTEXT and isinstance(context, AIAnalysisContext):
+            current_price = None
+            for kline in context.klines.values():
+                current_price = kline.current_price
+                break
+            if current_price is None:
+                current_price = 0.0
+            symbol = context.symbol
+        else:
+            current_price = context.current_price
+            symbol = context.symbol
+
         return EvidenceBasedDecision(
             action=ActionType.HOLD,
             evidence_count=1,
             evidence_chain=[f"解析失败，建议观望: {error[:100]}"],
             veto_flag=True,  # 阻止交易
-            entry_price=context.current_price,
-            stop_loss=context.current_price * 0.98,
-            take_profit=context.current_price * 1.02,
+            entry_price=current_price,
+            stop_loss=current_price * 0.98,
+            take_profit=current_price * 1.02,
             position_size=0.0,  # 不开仓
+            symbol=symbol,
             reasoning=f"解析失败，建议观望: {error}",
             metadata={
                 "error": error,
-                "symbol": context.symbol,
+                "symbol": symbol,
                 "fallback": True,
             },
         )
