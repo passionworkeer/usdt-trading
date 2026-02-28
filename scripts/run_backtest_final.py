@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-只交易 BTCUSDT 和 SOLUSDT 两个币种
-本金200U，每个币种100U保证金
+4h K线版 - 但用高低点触发止损（更精确）
 """
 import asyncio
 import json
@@ -11,8 +10,8 @@ import numpy as np
 import aiohttp
 from aiohttp_socks import ProxyConnector
 
-SYMBOLS = ['BTCUSDT', 'SOLUSDT']  # 只交易这两个
-POSITION_SIZE = 100  # 每个币种100U
+SYMBOLS = ['BTCUSDT', 'SOLUSDT']
+POSITION_SIZE = 100
 
 START_DATE = '2026-01-01'
 END_DATE = '2026-02-28'
@@ -31,9 +30,6 @@ class Backtester:
         self.connector = ProxyConnector.from_url('http://127.0.0.1:7890')
         self.session = None
         self.last_stop_loss = {}
-        self.daily_losses = {}  # 每日亏损记录
-        self.peak_capital = SHARED_CAPITAL  # 账户最高点
-        self.max_drawdown = 0  # 最大回撤
 
     async def _get_session(self):
         if self.session is None:
@@ -134,15 +130,41 @@ class Backtester:
                 return False
         return True
 
+    def check_stop_by_high_low(self, df: pd.DataFrame, entry_idx: int, side: str,
+                               entry_price: float, stop: float, target: float) -> dict:
+        """
+        检查是否触及止损止盈 - 用高低点而非收盘价
+        """
+        # 检查接下来几根K线
+        check_limit = min(entry_idx + 10, len(df))
+
+        for i in range(entry_idx + 1, check_limit):
+            candle = df.iloc[i]
+
+            if side == 'LONG':
+                # 止损：最低点跌到止损价
+                if candle['l'] <= stop:
+                    return {'triggered': True, 'exit_price': stop, 'reason': 'stop'}
+                # 止盈：最高点涨到止盈价
+                if candle['h'] >= target:
+                    return {'triggered': True, 'exit_price': target, 'reason': 'target'}
+            else:  # SHORT
+                # 止损：最高点涨到止损价
+                if candle['h'] >= stop:
+                    return {'triggered': True, 'exit_price': stop, 'reason': 'stop'}
+                # 止盈：最低点跌到止盈价
+                if candle['l'] <= target:
+                    return {'triggered': True, 'exit_price': target, 'reason': 'target'}
+
+        return {'triggered': False}
+
     async def run_backtest(self):
-        print(f"Running BTC+SOL backtest (1h candles)...")
-        print(f"  - Position size: {POSITION_SIZE}U per symbol")
-        print(f"  - Total capital: {SHARED_CAPITAL}U")
+        print(f"Running 4h with high-low stop-loss...")
 
         dfs = {}
         for symbol in SYMBOLS:
             print(f"  Fetching {symbol}...")
-            df = await self.fetch_klines(symbol, limit=1500)
+            df = await self.fetch_klines(symbol, '4h', 1500)
             df['ma20'] = df['c'].rolling(20).mean()
             df['ma50'] = df['c'].rolling(50).mean()
             df = df[(df['time'] >= START_DATE) & (df['time'] <= END_DATE)]
@@ -155,7 +177,7 @@ class Backtester:
         all_trades = []
         positions = {}
 
-        print(f"\nSimulating trades...")
+        print(f"\nSimulating...")
 
         for i in range(50, min_len):
             timestamp = dfs['BTCUSDT'].iloc[i]['time']
@@ -167,84 +189,44 @@ class Backtester:
 
                 confidence, leverage, trend, volatility = self.calculate_confidence(df, i)
 
-                # 平仓检查 - 持有到收盘价触及止盈/止损
+                # 平仓检查 - 用高低点
                 if symbol in positions:
                     pos = positions[symbol]
                     lev = pos['leverage']
                     notional_value = POSITION_SIZE * lev
-                    close = current['c']  # 收盘价
 
-                    if pos['side'] == 'LONG':
-                        # 做多：收盘价跌破止损 OR 收盘价涨过止盈
-                        if close <= pos['stop'] or close >= pos['target']:
-                            exit_price = pos['target'] if close >= pos['target'] else pos['stop']
-                            raw_pnl = (exit_price - pos['entry']) / pos['entry'] * POSITION_SIZE * lev
-                            open_fee = pos['notional_value'] * FEE_RATE
-                            close_fee = notional_value * FEE_RATE
-                            pnl = raw_pnl - open_fee - close_fee
-                            capital += pnl
-                            # 更新最大回撤
-                            if capital > self.peak_capital:
-                                self.peak_capital = capital
-                            drawdown = (self.peak_capital - capital) / self.peak_capital
-                            if drawdown > self.max_drawdown:
-                                self.max_drawdown = drawdown
+                    result = self.check_stop_by_high_low(
+                        df, pos['entry_idx'], pos['side'],
+                        pos['entry'], pos['stop'], pos['target']
+                    )
 
-                            pos['exit'] = exit_price
-                            pos['pnl'] = pnl
-                            pos['raw_pnl'] = raw_pnl
-                            pos['fees'] = open_fee + close_fee
-                            pos['exit_time'] = str(timestamp)
-                            all_trades.append(pos)
-                            if pnl < 0:
-                                self.last_stop_loss[symbol] = {'idx': i, 'side': pos['side']}
-                                # 记录当日亏损
-                                day = str(timestamp)[:10]
-                                if day not in self.daily_losses:
-                                    self.daily_losses[day] = 0
-                                self.daily_losses[day] += abs(pnl)
-                            del positions[symbol]
-                    else:
-                        # 做空：收盘价涨过止损 OR 收盘价跌过止盈
-                        if close >= pos['stop'] or close <= pos['target']:
-                            exit_price = pos['target'] if close <= pos['target'] else pos['stop']
-                            raw_pnl = (pos['entry'] - exit_price) / pos['entry'] * POSITION_SIZE * lev
-                            open_fee = pos['notional_value'] * FEE_RATE
-                            close_fee = notional_value * FEE_RATE
-                            pnl = raw_pnl - open_fee - close_fee
-                            capital += pnl
-                            # 更新最大回撤
-                            if capital > self.peak_capital:
-                                self.peak_capital = capital
-                            drawdown = (self.peak_capital - capital) / self.peak_capital
-                            if drawdown > self.max_drawdown:
-                                self.max_drawdown = drawdown
+                    if result['triggered']:
+                        exit_price = result['exit_price']
+                        raw_pnl = (exit_price - pos['entry']) / pos['entry'] * POSITION_SIZE * lev if pos['side'] == 'LONG' \
+                            else (pos['entry'] - exit_price) / pos['entry'] * POSITION_SIZE * lev
 
-                            pos['exit'] = exit_price
-                            pos['pnl'] = pnl
-                            pos['raw_pnl'] = raw_pnl
-                            pos['fees'] = open_fee + close_fee
-                            pos['exit_time'] = str(timestamp)
-                            all_trades.append(pos)
-                            if pnl < 0:
-                                self.last_stop_loss[symbol] = {'idx': i, 'side': pos['side']}
-                                # 记录当日亏损
-                                day = str(timestamp)[:10]
-                                if day not in self.daily_losses:
-                                    self.daily_losses[day] = 0
-                                self.daily_losses[day] += abs(pnl)
-                            del positions[symbol]
+                        open_fee = pos['notional_value'] * FEE_RATE
+                        close_fee = notional_value * FEE_RATE
+                        pnl = raw_pnl - open_fee - close_fee
+
+                        capital += pnl
+                        pos['exit'] = exit_price
+                        pos['pnl'] = pnl
+                        pos['raw_pnl'] = raw_pnl
+                        pos['fees'] = open_fee + close_fee
+                        pos['exit_time'] = str(timestamp)
+                        pos['exit_reason'] = result['reason']
+                        all_trades.append(pos)
+
+                        if pnl < 0:
+                            self.last_stop_loss[symbol] = {'idx': i, 'side': pos['side']}
+
+                        del positions[symbol]
 
                 # 开仓检查
                 if symbol not in positions and capital >= POSITION_SIZE and leverage > 0:
                     if trend in ['strong_bull', 'bull', 'strong_bear', 'bear']:
                         side = 'LONG' if 'bull' in trend else 'SHORT'
-
-                        # 检查当日亏损限制 ($30 = 15% of $200)
-                        day = str(timestamp)[:10]
-                        today_loss = self.daily_losses.get(day, 0)
-                        if today_loss >= 30:
-                            continue  # 当日亏损已达上限，停止开仓
 
                         if self.check_cooldown(symbol, i, side):
                             continue
@@ -287,7 +269,7 @@ class Backtester:
                             'status': 'OPEN'
                         }
 
-        # 平掉最后持仓
+        # 平最后持仓
         for symbol, pos in positions.items():
             df = dfs[symbol]
             pos['exit'] = df.iloc[-1]['c']
@@ -307,12 +289,6 @@ class Backtester:
             pos['raw_pnl'] = raw_pnl
             pos['fees'] = open_fee + close_fee
             capital += pnl
-            # 更新最大回撤
-            if capital > self.peak_capital:
-                self.peak_capital = capital
-            drawdown = (self.peak_capital - capital) / self.peak_capital
-            if drawdown > self.max_drawdown:
-                self.max_drawdown = drawdown
             all_trades.append(pos)
 
         results = []
@@ -334,48 +310,33 @@ class Backtester:
                 'trades': symbol_trades
             })
 
-        return results, capital, self.max_drawdown
+        return results, capital
 
 
 async def analyze_consecutive_losses(trades):
-    """分析最大连续亏损"""
-    # 按时间排序
     sorted_trades = sorted(trades, key=lambda x: x['entry_time'])
-
     max_consecutive = 0
     current_consecutive = 0
-    current_loss = 0
     max_loss = 0
 
     for t in sorted_trades:
         pnl = t.get('pnl', 0)
         if pnl < 0:
             current_consecutive += 1
-            current_loss += pnl
             max_consecutive = max(max_consecutive, current_consecutive)
-            max_loss = min(max_loss, current_loss)
         else:
             current_consecutive = 0
-            current_loss = 0
 
-    return max_consecutive, abs(max_loss)
-
-
-async def analyze_worst_case_scenario(trades):
-    """分析2月初反弹期间同时止损的最坏情况"""
-    # 2026年2月1日-7日是反弹期间
-    worst_period_trades = [t for t in trades
-                          if '2026-02-01' <= t.get('entry_time', '') <= '2026-02-07']
-
-    # 找同一时间段内亏损的交易
-    losses = [t for t in worst_period_trades if t.get('pnl', 0) < 0]
-
-    total_loss = sum(t['pnl'] for t in losses)
-
-    return len(losses), total_loss
+    return max_consecutive, abs(min([t.get('pnl', 0) for t in trades] or [0]))
 
 
-async def generate_report(results, capital, max_drawdown=0):
+async def analyze_worst_case(trades):
+    worst_period = [t for t in trades if '2026-02-01' <= t.get('entry_time', '') <= '2026-02-07']
+    losses = [t for t in worst_period if t.get('pnl', 0) < 0]
+    return len(losses), sum(t.get('pnl', 0) for t in losses)
+
+
+async def generate_report(results, capital):
     total_trades = sum(r['total_trades'] for r in results)
     total_wins = sum(r['wins'] for r in results)
     total_fees = sum(sum(t.get('fees', 0) for t in r['trades']) for r in results)
@@ -385,31 +346,27 @@ async def generate_report(results, capital, max_drawdown=0):
     for r in results:
         all_trades.extend(r['trades'])
 
-    # 分析连续亏损
     btc_trades = [t for t in all_trades if t['symbol'] == 'BTCUSDT']
     sol_trades = [t for t in all_trades if t['symbol'] == 'SOLUSDT']
 
-    btc_max_consec, btc_max_loss = await analyze_consecutive_losses(btc_trades)
-    sol_max_consec, sol_max_loss = await analyze_consecutive_losses(sol_trades)
+    btc_max, btc_loss = await analyze_consecutive_losses(btc_trades)
+    sol_max, sol_loss = await analyze_consecutive_losses(sol_trades)
+    worst_count, worst_loss = await analyze_worst_case(all_trades)
 
-    # 分析最坏情况
-    worst_count, worst_loss = await analyze_worst_case_scenario(all_trades)
-
-    md = f"""# MTF 智能交易系统 - 交割单 (1小时K线版)
+    md = f"""# MTF 智能交易系统 - 交割单
 ## 2026年1月1日 ~ 2026年2月28日
 
 ### 策略参数
-- **交易币种**: BTCUSDT, SOLUSDT (只做这两个)
-- **K线周期**: 4小时 (信号判断)
-- **出场逻辑**: 收盘价触及止盈/止损
-- **单日亏损限制**: 每日亏损超过$30停止开仓
-- **保证金分配**: 每个币种100U，总计200U
+- **交易币种**: BTCUSDT, SOLUSDT
+- **K线周期**: 4小时（信号判断 + 止损执行）
+- **止损触发**: 检查K线最高/最低点（更精确）
+- **保证金**: 每个币种100U，共200U
 - **最大杠杆**: 10x
-- **止损设置**: 10倍杠杆2%，5倍杠杆3%
-- **手续费**: 0.05% (按名义价值)
-- **风控机制**:
-  - 同方向冷却期: 止损后等待4根K线
-  - 低置信度确认: <50%需观察2根K线
+- **止损**: 10倍2%，5倍3%
+- **止盈**: 止损的2倍
+- **手续费**: 0.05% (名义价值)
+- **冷却期**: 4根4小时K线
+- **低置信度确认**: <50%需2根K线确认
 
 ### 汇总
 | 指标 | 数值 |
@@ -420,16 +377,6 @@ async def generate_report(results, capital, max_drawdown=0):
 | 总交易 | {total_trades}笔 |
 | 胜率 | {total_wins}/{total_trades} ({total_wins/total_trades*100:.0f}%) |
 | 手续费 | ${total_fees:.2f} |
-| **最大回撤** | **{max_drawdown*100:.1f}%** |
-
-### 风控新增
-- **单日亏损限制**: 每日亏损超过$30(15%)停止开仓
-
-### 对比v2版本
-| 指标 | v2 (4币种) | 精简版 (2币种) | 变化 |
-|------|-----------|---------------|------|
-| 净收益 | $207.72 | ${profit:.2f} | {profit-207.72:+.2f} |
-| 交易数 | 65笔 | {total_trades}笔 | {total_trades-65:+d} |
 
 ---
 
@@ -439,7 +386,6 @@ async def generate_report(results, capital, max_drawdown=0):
     for symbol_data in results:
         symbol = symbol_data['symbol']
         trades = symbol_data['trades']
-
         if not trades:
             continue
 
@@ -452,34 +398,23 @@ async def generate_report(results, capital, max_drawdown=0):
             pnl = t.get('pnl', 0)
             pnl_text = f"**${pnl:+.2f}**" if pnl != 0 else "-"
             exit_price = f"{t.get('exit', 0):.2f}" if t.get('exit') else "持仓中"
-
             md += f"| {idx} | {t['entry_time'][:16]} | {side_text} | {t['entry']:.2f} | {exit_price} | {t['leverage']}x | {t.get('confidence', 0):.0f}% | {pnl_text} |\n"
 
-        symbol_profit = sum(t['pnl'] for t in trades if 'pnl' in t)
+        symbol_profit = sum(t['pnl'] for t in trades)
         symbol_wins = sum(1 for t in trades if t.get('pnl', 0) > 0)
-        symbol_losses = len(trades) - symbol_wins
+        md += f"\n**{symbol}小结**: ${symbol_profit:+.2f} ({symbol_wins}胜{len(trades)-symbol_wins}负)\n\n---\n"
 
-        md += f"\n**{symbol}小结**: ${symbol_profit:+.2f} ({symbol_wins}胜{symbol_losses}负)\n\n---\n"
-
-    # 最赚钱/亏损
     sorted_by_pnl = sorted([t for t in all_trades if 'pnl' in t], key=lambda x: x['pnl'], reverse=True)
 
-    md += "\n## 关键交易分析\n\n"
-    md += "### 最赚钱的5笔\n\n"
-    md += "| # | 币种 | 时间 | 方向 | 盈亏 |\n"
-    md += "|---|------|------|------|------|\n"
-
+    md += "\n## 关键交易\n\n### 最赚钱5笔\n| # | 币种 | 时间 | 方向 | 盈亏 |\n|---|------|------|------|------|\n"
     for idx, t in enumerate(sorted_by_pnl[:5], 1):
-        side_text = "做多" if t['side'] == 'LONG' else "做空"
-        md += f"| {idx} | {t['symbol'].replace('USDT', '')} | {t['entry_time'][:16]} | {side_text} | ${t['pnl']:+.2f} |\n"
+        side = "做多" if t['side'] == 'LONG' else "做空"
+        md += f"| {idx} | {t['symbol'].replace('USDT','')} | {t['entry_time'][:16]} | {side} | ${t['pnl']:+.2f} |\n"
 
-    md += "\n### 亏损最大的5笔\n\n"
-    md += "| # | 币种 | 时间 | 方向 | 盈亏 |\n"
-    md += "|---|------|------|------|------|\n"
-
+    md += "\n### 亏损最大5笔\n| # | 币种 | 时间 | 方向 | 盈亏 |\n|---|------|------|------|------|\n"
     for idx, t in enumerate(sorted_by_pnl[-5:][::-1], 1):
-        side_text = "做多" if t['side'] == 'LONG' else "做空"
-        md += f"| {idx} | {t['symbol'].replace('USDT', '')} | {t['entry_time'][:16]} | {side_text} | ${t['pnl']:+.2f} |\n"
+        side = "做多" if t['side'] == 'LONG' else "做空"
+        md += f"| {idx} | {t['symbol'].replace('USDT','')} | {t['entry_time'][:16]} | {side} | ${t['pnl']:+.2f} |\n"
 
     md += f"""
 
@@ -488,64 +423,46 @@ async def generate_report(results, capital, max_drawdown=0):
 ## 风险分析
 
 ### 最大连续亏损
-| 币种 | 最大连续亏损笔数 | 累计亏损 |
-|------|-----------------|----------|
-| BTC | {btc_max_consec}笔 | ${btc_max_loss:.2f} |
-| SOL | {sol_max_consec}笔 | ${sol_max_loss:.2f} |
+| 币种 | 笔数 | 金额 |
+|------|------|------|
+| BTC | {btc_max}笔 | ${btc_loss:.2f} |
+| SOL | {sol_max}笔 | ${sol_loss:.2f} |
 
-### 2月初反弹期间最坏情况
-- 同时止损交易数: {worst_count}笔
-- 累计亏损: ${worst_loss:.2f}
-
----
-
-## 总结
-
-1. **精简版 vs v2**: 净收益 {profit-207.72:+.2f} ({(profit-207.72)/207.72*100:+.1f}%)
-2. **交易数变化**: {total_trades-65:+d}笔
-3. **风险特征**: 最大连续亏损{sol_max_consec}笔(SOL), 最坏情况同时亏${abs(worst_loss):.2f}
+### 2月初最坏情况
+- 止损数: {worst_count}笔
+- 累计: ${worst_loss:.2f}
 """
 
-    output_file = Path(__file__).parent / "trading_record_btc_sol_1h.md"
+    output_file = Path(__file__).parent / "trading_record_final.md"
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(md)
 
     print(f"\nReport: {output_file}")
-    return output_file
 
 
 async def main():
     bt = Backtester()
 
     print("="*60)
-    print("BTC + SOL Backtest (1h Candles)")
-    print(f"Capital: {SHARED_CAPITAL}U (100U each)")
-    print(f"Period: {START_DATE} ~ {END_DATE}")
-    print(f"Cooldown: {COOLDOWN_PERIOD}h | Confirmation: {CONFIRMATION_WAIT}h")
+    print("4h + High-Low Stop-Loss Backtest")
+    print(f"Capital: {SHARED_CAPITAL}U")
     print("="*60)
 
-    results, capital, max_drawdown = await bt.run_backtest()
+    results, capital = await bt.run_backtest()
 
-    # 打印汇总
     total_trades = sum(r['total_trades'] for r in results)
     wins = sum(r['wins'] for r in results)
     total_fees = sum(sum(t.get('fees', 0) for t in r['trades']) for r in results)
     profit = capital - SHARED_CAPITAL
 
     print("\n" + "="*60)
-    print("Results")
-    print("="*60)
-    print(f"Initial: ${SHARED_CAPITAL}")
     print(f"Final: ${capital:.2f}")
-    print(f"Profit: ${profit:.2f} ({profit/SHARED_CAPITAL*100:+.1f}%)")
-    print(f"Trades: {total_trades}")
-    print(f"Win rate: {wins}/{total_trades} ({wins/total_trades*100:.0f}%)")
+    print(f"Profit: ${profit:.2f} ({profit/200*100:+.1f}%)")
+    print(f"Trades: {total_trades}, Win rate: {wins}/{total_trades} ({wins/total_trades*100:.0f}%)")
     print(f"Fees: ${total_fees:.2f}")
+    print("="*60)
 
-    print(f"\nvs v2 (4 coins): $207.72")
-    print(f"Change: ${profit - 207.72:.2f}")
-
-    await generate_report(results, capital, max_drawdown)
+    await generate_report(results, capital)
 
     if bt.session:
         await bt.session.close()
