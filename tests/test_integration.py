@@ -190,7 +190,8 @@ class MockStrategy(BaseStrategy):
             symbol=market_data.symbol,
             action=self._signal_action,
             strength=SignalStrength.STRONG,
-            confidence=0.85,
+            evidence_count=3,
+            evidence_chain=["RSI低于30", "MACD金叉", "成交量放大"],
             metadata={"strategy": self._name}
         )
 
@@ -295,7 +296,7 @@ def signal_pool():
     pool = SignalPool()
     pool.register_strategy(MockStrategy(name="strategy_1"))
     pool.register_strategy(MockStrategy(name="strategy_2"))
-    return signal_pool
+    return pool
 
 
 @pytest.fixture
