@@ -59,3 +59,7 @@ data/cache.db
 data/ship.db
 .coverage
 scripts/backtest_results*.json
+scripts/paper_trading_state.json
+scripts/paper_trading.log
+scripts/run_backtest_btc_sol.py
+scripts/trading_record_btc_sol_1h.md
