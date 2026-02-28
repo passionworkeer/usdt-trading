@@ -32,7 +32,7 @@ LOG_FILE = 'scripts/paper_trading.log'
 RECORD_FILE = 'scripts/paper_trading_record.md'  # 交割单
 
 # 检查间隔（秒）
-CHECK_INTERVAL = 4 * 60 * 60  # 4小时
+CHECK_INTERVAL = 30 * 60  # 30分钟
 
 
 class ATRAutoTrader:
@@ -378,7 +378,7 @@ class ATRAutoTrader:
         self.log("=" * 60)
         self.log("ATR Auto Paper Trading Started")
         self.log(f"Initial Capital: ${self.capital:.2f}")
-        self.log(f"Check Interval: {CHECK_INTERVAL/3600:.1f} hours")
+        self.log(f"Check Interval: {CHECK_INTERVAL/60:.0f} minutes")
         self.log("=" * 60)
 
         while True:
@@ -387,7 +387,7 @@ class ATRAutoTrader:
             except Exception as e:
                 self.log(f"Error in check cycle: {e}")
 
-            self.log(f"Sleeping for {CHECK_INTERVAL/3600:.1f} hours...")
+            self.log(f"Sleeping for {CHECK_INTERVAL/60:.0f} minutes...")
             await asyncio.sleep(CHECK_INTERVAL)
 
     async def cleanup(self):
