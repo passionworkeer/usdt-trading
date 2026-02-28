@@ -155,17 +155,23 @@ class TestMTFKlinesCollector:
         """测试获取K线"""
         from src.ai.data.mtf_klines import MTFKlinesCollector
 
-        # 创建 mock session
+        # 创建 mock response - 需要包含 Binance API 返回的全部 12 列
         mock_response = AsyncMock()
         mock_response.status = 200
         mock_response.json = AsyncMock(return_value=[
-            [1704067200000, "50000", "51000", "49000", "50500", "1000"],
-            [1704070800000, "50500", "51500", "50000", "51000", "1200"],
+            [1704067200000, "50000", "51000", "49000", "50500", "1000", 1704067299999, "50000000", 100, "500", "50000", "0"],
+            [1704070800000, "50500", "51500", "50000", "51000", "1200", 1704074399999, "60000000", 120, "600", "60000", "0"],
         ])
 
-        mock_session = AsyncMock()
-        mock_session.get.return_value.__aenter__ = AsyncMock(return_value=mock_response)
-        mock_session.get.return_value.__aexit__ = AsyncMock(return_value=None)
+        # 使用 MagicMock 来正确模拟上下文管理器
+        # aiohttp.ClientSession.get() 返回 _RequestContext 对象
+        mock_context = MagicMock()
+        mock_context.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_context.__aexit__ = AsyncMock(return_value=None)
+
+        # Mock session
+        mock_session = MagicMock()
+        mock_session.get = MagicMock(return_value=mock_context)
 
         collector = MTFKlinesCollector(mock_session)
         result = await collector.fetch('BTCUSDT', '15m', 2)

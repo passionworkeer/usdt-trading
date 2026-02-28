@@ -4,6 +4,7 @@
 import pytest
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
@@ -31,12 +32,22 @@ class TestOrderExecutor:
         assert ticker['last'] > 0
 
     def test_get_balance(self):
-        """测试获取余额"""
-        executor = OrderExecutor(testnet=True)
-        balance = executor.get_balance()
+        """测试获取余额 - 使用 mock"""
+        with patch.object(OrderExecutor, '__init__', lambda self, testnet=True: None):
+            executor = OrderExecutor(testnet=True)
+            # Mock exchange 对象
+            executor.exchange = MagicMock()
+            executor.exchange.fetch_balance = MagicMock(return_value={
+                'USDT': {'free': 1000.0, 'used': 0.0, 'total': 1000.0},
+                'BTC': {'free': 0.1, 'used': 0.0, 'total': 0.1}
+            })
 
-        assert balance is not None
-        assert isinstance(balance, dict)
+            balance = executor.get_balance()
+
+            assert balance is not None
+            assert isinstance(balance, dict)
+            assert 'USDT' in balance
+            assert balance['USDT']['free'] == 1000.0
 
     def test_check_symbol_exists(self):
         """测试交易对检查"""

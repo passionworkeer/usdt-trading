@@ -16,9 +16,7 @@ import websockets
 import json
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime
-from dotenv import load_dotenv
-
-load_dotenv()
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 

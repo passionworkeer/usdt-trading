@@ -20,9 +20,10 @@ import aiohttp
 from aiohttp_socks import ProxyConnector
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, HTTPException, Security
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import uvicorn
 import logging
 
@@ -33,6 +34,25 @@ logger = logging.getLogger(__name__)
 SYMBOLS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT']
 POSITION_SIZE = 20  # 每次仓位
 CAPITAL = 200.0
+
+# API认证配置
+API_TOKEN = os.environ.get("DASHBOARD_API_TOKEN", "")  # 从环境变量读取Token
+security = HTTPBearer(auto_error=False)
+
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)) -> str:
+    """验证API Token"""
+    if not API_TOKEN:
+        # 未配置Token，跳过验证（仅限开发环境）
+        return "dev"
+
+    if credentials is None:
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+
+    if credentials.credentials != API_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid authentication token")
+
+    return credentials.credentials
 
 # ============== 数据类 ==============
 @dataclass
@@ -279,7 +299,7 @@ trade_manager = TradeManager(CAPITAL)
 
 
 @app.get("/api/market/{symbol}")
-async def get_market_data(symbol: str, interval: str = '4h'):
+async def get_market_data(symbol: str, interval: str = '4h', token: str = Security(verify_token)):
     """获取市场数据"""
     if symbol not in SYMBOLS:
         return {'error': 'Invalid symbol'}
@@ -289,7 +309,7 @@ async def get_market_data(symbol: str, interval: str = '4h'):
 
 
 @app.get("/api/signals")
-async def get_signals():
+async def get_signals(token: str = Security(verify_token)):
     """获取所有信号"""
     signals = []
     for symbol in SYMBOLS:
@@ -299,25 +319,25 @@ async def get_signals():
 
 
 @app.get("/api/account")
-async def get_account():
+async def get_account(token: str = Security(verify_token)):
     """获取账户状态"""
     return trade_manager.get_account()
 
 
 @app.get("/api/positions")
-async def get_positions():
+async def get_positions(token: str = Security(verify_token)):
     """获取持仓"""
     return trade_manager.get_positions()
 
 
 @app.get("/api/trades")
-async def get_trades(limit: int = 20):
+async def get_trades(limit: int = 20, token: str = Security(verify_token)):
     """获取交易历史"""
     return trade_manager.get_trades(limit)
 
 
 @app.get("/api/backtest")
-async def get_backtest():
+async def get_backtest(token: str = Security(verify_token)):
     """获取回测结果"""
     results_file = Path(__file__).parent.parent / "backtest_results.json"
     if results_file.exists():
@@ -347,4 +367,4 @@ if __name__ == "__main__":
     print("Open http://localhost:8888 in your browser")
     print("="*60)
 
-    uvicorn.run(app, host="0.0.0.0", port=8888)
+    uvicorn.run(app, host="127.0.0.1", port=8888)

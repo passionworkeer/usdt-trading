@@ -6,9 +6,7 @@ import logging
 from typing import Dict, Tuple, Optional, List
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
-from dotenv import load_dotenv
-
-load_dotenv()
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 

@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from src.ai.provider.base import ActionType, EvidenceBasedDecision
+# 从统一模型导入
+from src.models import ActionType, EvidenceBasedDecision
 
 logger = logging.getLogger(__name__)
 

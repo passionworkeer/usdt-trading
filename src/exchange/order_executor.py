@@ -6,9 +6,7 @@ import os
 import logging
 from typing import Dict, Optional, List
 from datetime import datetime
-from dotenv import load_dotenv
-
-load_dotenv()
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
