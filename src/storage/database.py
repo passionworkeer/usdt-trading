@@ -118,8 +118,10 @@ class TradingDatabase:
 
         async with self._lock:
             async with aiosqlite.connect(self.db_path) as db:
-                # 启用外键约束
-                await db.execute("PRAGMA foreign_keys = ON")
+                # 性能优化配置
+                await db.execute("PRAGMA journal_mode=WAL")
+                await db.execute("PRAGMA synchronous=NORMAL")
+                await db.execute("PRAGMA foreign_keys=ON")
 
                 # 创建交易表（v9.0 证据链架构）
                 await db.execute("""
