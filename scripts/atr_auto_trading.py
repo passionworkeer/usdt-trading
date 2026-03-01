@@ -11,8 +11,14 @@ from aiohttp_socks import ProxyConnector
 from datetime import datetime
 import json
 import os
+import sys
 import time
 import socket
+
+# 添加项目路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from src.data_sources import get_funding_source
 
 PROXY_URL = 'http://127.0.0.1:7890'
 
@@ -20,6 +26,10 @@ SYMBOLS = ['BTCUSDT', 'SOLUSDT']
 POSITION_SIZE = 100
 SHARED_CAPITAL = 200.0
 FEE_RATE = 0.0005
+
+# 资金费率过滤参数
+FUNDING_BLOCK_LONG = 0.08   # 资金费率 > 0.08% 时禁止做多
+FUNDING_BLOCK_SHORT = -0.08  # 资金费率 < -0.08% 时禁止做空
 
 # ATR参数
 ATR_PERIOD = 14
@@ -46,8 +56,20 @@ class ATRAutoTrader:
         self.positions = {}
         self.trades = []
         self.daily_losses = {}
+        self.funding_source = None  # 资金费率数据源
 
         self.load_state()
+
+    async def get_funding_data(self, symbol: str) -> dict:
+        """获取资金费率数据"""
+        if self.funding_source is None:
+            self.funding_source = await get_funding_source()
+
+        # 去掉 USDT 后缀
+        symbol_clean = symbol.replace('USDT', '')
+        funding = await self.funding_source.get_comprehensive_funding(symbol_clean)
+
+        return funding or {}
 
     def check_proxy(self):
         """检查代理是否可用"""
@@ -413,11 +435,39 @@ class ATRAutoTrader:
                 continue
 
             try:
+                # === 资金费率过滤 ===
+                funding = await self.get_funding_data(symbol)
+                funding_rate = funding.get('funding_rate', 0)
+                funding_sentiment = funding.get('sentiment', 'neutral')
+
+                self.log(f"{symbol}: 资金费率={funding_rate:.4f}%, 情绪={funding_sentiment}")
+
+                # 获取原始信号
                 df = await self.fetch_klines(symbol, '4h', 200)
                 signal = self.check_entry_signal(df)
 
                 if signal:
-                    self.open_position(symbol, signal)
+                    side = signal.get('side', 'LONG')
+
+                    # 资金费率过滤逻辑
+                    blocked = False
+                    block_reason = ""
+
+                    if side == 'LONG' and funding_rate > FUNDING_BLOCK_LONG:
+                        blocked = True
+                        block_reason = f"资金费率过高({funding_rate:.4f}%),禁止做多"
+                    elif side == 'SHORT' and funding_rate < FUNDING_BLOCK_SHORT:
+                        blocked = True
+                        block_reason = f"资金费率过低({funding_rate:.4f}%),禁止做空"
+
+                    if blocked:
+                        self.log(f"{symbol}: 信号被资金费率过滤 - {block_reason}")
+                        signal = None
+                    else:
+                        # 添加资金费率信息到信号
+                        signal['funding_rate'] = funding_rate
+                        signal['funding_sentiment'] = funding_sentiment
+                        self.open_position(symbol, signal)
             except Exception as e:
                 self.log(f"Error checking {symbol} signal: {e}")
 

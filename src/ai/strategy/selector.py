@@ -12,6 +12,7 @@ from src.ai.models import TradingSignal, ActionType, SignalStrength
 from src.ai.provider.base import MarketContext, EvidenceBasedDecision
 from src.ai.provider.manager import AIProviderManager
 from src.risk.evidence_controller import EvidenceBasedRiskController
+from src.data_sources import get_funding_source
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,75 @@ class StrategySelector:
             'errors': 0,
         }
         self._logger = logging.getLogger(__name__)
+        self._funding_source = None
+
+    async def _enhance_with_funding_data(self, context: MarketContext) -> MarketContext:
+        """
+        增强市场上下文 - 添加资金费率数据
+
+        Args:
+            context: 原始市场上下文
+
+        Returns:
+            增强后的上下文
+        """
+        try:
+            # 懒加载 funding source
+            if self._funding_source is None:
+                self._funding_source = await get_funding_source()
+
+            # 获取资金费率数据
+            funding_data = await self._funding_source.get_comprehensive_funding(context.symbol)
+
+            if not funding_data:
+                return context
+
+            # 增强 indicators
+            enhanced_indicators = dict(context.indicators)
+            enhanced_indicators['funding_rate'] = funding_data.get('funding_rate', 0)
+            enhanced_indicators['funding_sentiment'] = funding_data.get('sentiment', 'neutral')
+            enhanced_indicators['funding_score'] = funding_data.get('sentiment_score', 0.5)
+
+            # 多空比
+            ls = funding_data.get('long_short', {})
+            if ls:
+                enhanced_indicators['long_ratio'] = ls.get('long_ratio', 50)
+                enhanced_indicators['short_ratio'] = ls.get('short_ratio', 50)
+
+            # 吃单多空比
+            taker = funding_data.get('taker_ratio', {})
+            if taker:
+                enhanced_indicators['taker_long_ratio'] = taker.get('long_buy_ratio', 1)
+
+            # 资金费率信号
+            signals = funding_data.get('signals', [])
+            if signals:
+                enhanced_indicators['funding_signals'] = [
+                    {'type': s.get('type'), 'message': s.get('message')}
+                    for s in signals
+                ]
+
+            self._logger.debug(
+                f"资金费率数据已注入: {context.symbol}, "
+                f"费率={funding_data.get('funding_rate', 0):.4f}%, "
+                f"情绪={funding_data.get('sentiment')}"
+            )
+
+            # 创建新的 MarketContext
+            return MarketContext(
+                symbol=context.symbol,
+                current_price=context.current_price,
+                price_history=context.price_history,
+                volume_24h=context.volume_24h,
+                market_cap=context.market_cap,
+                indicators=enhanced_indicators,
+                news_sentiment=context.news_sentiment,
+                timestamp=context.timestamp
+            )
+
+        except Exception as e:
+            self._logger.warning(f"获取资金费率数据失败: {e}")
+            return context
 
     async def select(
         self,
@@ -109,6 +179,9 @@ class StrategySelector:
             signals = signals[:self.max_signals]
 
         try:
+            # 0. 增强市场上下文 - 添加资金费率数据
+            market_context = await self._enhance_with_funding_data(market_context)
+
             # 1. 调用 AI Provider 获取决策
             provider = self.provider_manager.get_active()
             decision = await provider.analyze(market_context)
