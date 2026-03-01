@@ -12,6 +12,9 @@ from datetime import datetime
 import json
 import os
 import time
+import socket
+
+PROXY_URL = 'http://127.0.0.1:7890'
 
 SYMBOLS = ['BTCUSDT', 'SOLUSDT']
 POSITION_SIZE = 100
@@ -32,12 +35,12 @@ LOG_FILE = 'scripts/paper_trading.log'
 RECORD_FILE = 'scripts/paper_trading_record.md'  # 交割单
 
 # 检查间隔（秒）
-CHECK_INTERVAL = 30 * 60  # 30分钟
+CHECK_INTERVAL = 15 * 60  # 15分钟
 
 
 class ATRAutoTrader:
     def __init__(self):
-        self.connector = ProxyConnector.from_url('http://127.0.0.1:7890')
+        self.connector = ProxyConnector.from_url(PROXY_URL)
         self.session = None
         self.capital = SHARED_CAPITAL
         self.positions = {}
@@ -45,6 +48,26 @@ class ATRAutoTrader:
         self.daily_losses = {}
 
         self.load_state()
+
+    def check_proxy(self):
+        """检查代理是否可用"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3)
+            proxy_host = PROXY_URL.replace('http://', '').split(':')[0]
+            proxy_port = int(PROXY_URL.split(':')[-1])
+            sock.connect((proxy_host, proxy_port))
+            sock.close()
+            return True
+        except:
+            return False
+
+    def wait_for_proxy(self):
+        """等待代理恢复"""
+        while not self.check_proxy():
+            self.log(f"Proxy unavailable, retrying in 30s...")
+            time.sleep(30)
+        self.log("Proxy connected!")
 
     def log(self, message):
         """记录日志"""
@@ -125,13 +148,16 @@ class ATRAutoTrader:
         atr_pct = current['atr_pct']
 
         avg_atr = df['atr'].iloc[i-VOLATILITY_LOOKBACK:i].mean()
-        if atr < avg_atr * VOLATILITY_THRESHOLD:
-            return None
 
         high_20 = df['h'].iloc[i-ENTRY_LOOKBACK:i].max()
         low_20 = df['l'].iloc[i-ENTRY_LOOKBACK:i].min()
 
-        if price > high_20:
+        # 计算距离
+        pct_to_high = (high_20 - price) / price * 100  # 距高点百分比
+        pct_to_low = (price - low_20) / low_20 * 100   # 距低点百分比
+
+        # === 条件1: 趋势突破入场 (突破20日高点 + ATR突破) ===
+        if price > high_20 and atr > avg_atr * VOLATILITY_THRESHOLD:
             atr_stop = atr * ATR_MULTIPLE
             leverage = 10 if atr_pct < 3 else (5 if atr_pct < 5 else 3)
             return {
@@ -139,9 +165,26 @@ class ATRAutoTrader:
                 'entry': price,
                 'stop': price - atr_stop,
                 'target': price + atr_stop * 2,
-                'leverage': leverage
+                'leverage': leverage,
+                'reason': '趋势突破20日高点'
             }
-        elif price < low_20:
+
+        # === 条件2: 支撑位入场 (接近20日低点 + ATR放大) ===
+        # 价格距低点<10%，且ATR开始放大(>1.0倍均值)
+        if pct_to_low < 10 and atr > avg_atr * 1.0:
+            atr_stop = atr * ATR_MULTIPLE
+            leverage = 10 if atr_pct < 3 else (5 if atr_pct < 5 else 3)
+            return {
+                'side': 'LONG',
+                'entry': price,
+                'stop': price - atr_stop,
+                'target': price + atr_stop * 2,
+                'leverage': leverage,
+                'reason': f'支撑位，距20日低点{pct_to_low:.1f}%'
+            }
+
+        # === 条件3: 做空 (跌破20日低点 + ATR突破) ===
+        if price < low_20 and atr > avg_atr * VOLATILITY_THRESHOLD:
             atr_stop = atr * ATR_MULTIPLE
             leverage = 10 if atr_pct < 3 else (5 if atr_pct < 5 else 3)
             return {
@@ -149,7 +192,21 @@ class ATRAutoTrader:
                 'entry': price,
                 'stop': price + atr_stop,
                 'target': price - atr_stop * 2,
-                'leverage': leverage
+                'leverage': leverage,
+                'reason': '趋势跌破20日低点'
+            }
+
+        # === 条件4: 阻力位做空 (接近20日高点 + ATR放大) ===
+        if pct_to_high < 10 and atr > avg_atr * 1.0:
+            atr_stop = atr * ATR_MULTIPLE
+            leverage = 10 if atr_pct < 3 else (5 if atr_pct < 5 else 3)
+            return {
+                'side': 'SHORT',
+                'entry': price,
+                'stop': price + atr_stop,
+                'target': price - atr_stop * 2,
+                'leverage': leverage,
+                'reason': f'阻力位，距20日高点{pct_to_high:.1f}%'
             }
 
         return None
@@ -189,7 +246,7 @@ class ATRAutoTrader:
 
         # 计算入场原因
         df = asyncio.get_event_loop().run_until_complete(self.fetch_klines(symbol, '4h', 200)) if hasattr(self, '_last_df') else None
-        entry_reason = f"价格突破20日{'高' if signal['side'] == 'LONG' else '低'}点，ATR波动率过滤器通过"
+        entry_reason = signal.get('reason', f"价格突破20日{'高' if signal['side'] == 'LONG' else '低'}点")
 
         self.positions[symbol] = {
             'side': signal['side'],
@@ -382,10 +439,17 @@ class ATRAutoTrader:
         self.log("=" * 60)
 
         while True:
+            # 检查代理是否可用
+            if not self.check_proxy():
+                self.wait_for_proxy()
+
             try:
                 await self.check_and_trade()
             except Exception as e:
                 self.log(f"Error in check cycle: {e}")
+                # 如果是代理问题，等待后重试
+                if "proxy" in str(e).lower() or "connection" in str(e).lower():
+                    self.wait_for_proxy()
 
             self.log(f"Sleeping for {CHECK_INTERVAL/60:.0f} minutes...")
             await asyncio.sleep(CHECK_INTERVAL)
