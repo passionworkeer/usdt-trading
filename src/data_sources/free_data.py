@@ -15,7 +15,7 @@ import json
 logger = logging.getLogger(__name__)
 
 # 代理配置
-PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY")
+PROXY = os.environ.get("HTTP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("ALL_PROXY") or "http://127.0.0.1:7890"
 
 
 @dataclass
