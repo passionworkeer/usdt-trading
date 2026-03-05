@@ -10,7 +10,7 @@ v5.3: Webhook 预警系统（Telegram / Discord）
 import logging
 import os
 import asyncio
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 from dataclasses import dataclass
 from enum import Enum
 import aiohttp
@@ -27,6 +27,14 @@ class AlertType(Enum):
     TRAILING_STOP = "TRAILING_STOP"  # 移动止盈完成
     EMERGENCY_CLOSE = "EMERGENCY_CLOSE"  # 紧急平仓
     SYSTEM_WARNING = "SYSTEM_WARNING"  # 系统警告
+    # 新增预警类型
+    SCAN_START = "SCAN_START"  # 开始扫描
+    SCAN_COMPLETE = "SCAN_COMPLETE"  # 扫描完成
+    NO_SIGNAL = "NO_SIGNAL"  # 无交易信号
+    HEALTH_CHECK = "HEALTH_CHECK"  # 健康检查
+    POSITION_OPENED = "POSITION_OPENED"  # 仓位开启
+    POSITION_CLOSED = "POSITION_CLOSED"  # 仓位平仓
+    PNL_UPDATE = "PNL_UPDATE"  # 盈亏更新
 
 
 @dataclass
@@ -492,6 +500,121 @@ class WebhookAlerter:
             details={
                 "title": title,
                 "message": message,
+            }
+        )
+
+        return await self.send_alert(alert)
+
+    async def alert_scan_complete(
+        self,
+        symbols: List[str],
+        signal_count: int,
+        no_signal_reason: str = ""
+    ) -> bool:
+        """
+        预警：扫描完成
+
+        Args:
+            symbols: 扫描的交易对列表
+            signal_count: 信号数量
+            no_signal_reason: 无信号原因
+
+        Returns:
+            是否发送成功
+        """
+        if signal_count > 0:
+            message = f"发现 {signal_count} 个交易信号!"
+        else:
+            message = f"无交易信号\n{no_signal_reason}"
+
+        alert = AlertMessage(
+            alert_type=AlertType.SCAN_COMPLETE,
+            symbol="",
+            side="",
+            message=message,
+            details={
+                "扫描交易对": ", ".join(symbols),
+                "信号数量": str(signal_count),
+            }
+        )
+
+        return await self.send_alert(alert)
+
+    async def alert_position_update(
+        self,
+        action: str,  # "open" or "close"
+        symbol: str,
+        side: str,
+        quantity: float,
+        price: float,
+        pnl: Optional[float] = None
+    ) -> bool:
+        """
+        预警：仓位更新
+
+        Args:
+            action: 操作类型
+            symbol: 交易对
+            side: 多空
+            quantity: 数量
+            price: 价格
+            pnl: 盈亏（平仓时）
+
+        Returns:
+            是否发送成功
+        """
+        if action == "open":
+            alert_type = AlertType.POSITION_OPENED
+            message = f"新开仓位: {symbol} {side}"
+        else:
+            alert_type = AlertType.POSITION_CLOSED
+            message = f"平仓: {symbol} {side}"
+
+        details = {
+            "数量": f"{quantity:.4f}",
+            "价格": f"${price:.2f}",
+        }
+
+        if pnl is not None:
+            details["盈亏"] = f"${pnl:+.2f}"
+
+        alert = AlertMessage(
+            alert_type=alert_type,
+            symbol=symbol,
+            side=side,
+            message=message,
+            details=details
+        )
+
+        return await self.send_alert(alert)
+
+    async def alert_health_check(
+        self,
+        status: str,
+        latency_ms: float,
+        errors: List[str]
+    ) -> bool:
+        """
+        预警：健康检查
+
+        Args:
+            status: 状态
+            latency_ms: 延迟
+            errors: 错误列表
+
+        Returns:
+            是否发送成功
+        """
+        status_emoji = "✅" if status == "HEALTHY" else "⚠️"
+
+        alert = AlertMessage(
+            alert_type=AlertType.HEALTH_CHECK,
+            symbol="",
+            side="",
+            message=f"{status_emoji} 健康检查: {status}",
+            details={
+                "延迟": f"{latency_ms:.0f}ms",
+                "错误": ", ".join(errors) if errors else "无",
             }
         )
 
