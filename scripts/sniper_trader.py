@@ -148,8 +148,8 @@ def update_trading_log(scan_time: str, status: str, positions: Dict, signal: Opt
     position_info = ""
     if positions:
         for sym, pos in positions.items():
-            entry = pos.get('entry', 0)
-            side = pos.get('side', 'UNKNOWN')
+            entry = pos.entry_price if hasattr(pos, 'entry_price') else 0
+            side = pos.side.value if hasattr(pos.side, 'value') else (pos.side if hasattr(pos, 'side') else 'UNKNOWN')
             position_info += f"\n- **{sym}**: {side} (入场价 ${entry:.2f})"
     else:
         position_info = "\n- 无持仓"
@@ -1333,8 +1333,8 @@ class SniperTrader:
                     positions_info = {}
                     for sym, pos in self.position_manager.positions.items():
                         positions_info[sym] = {
-                            'side': pos.get('side', 'UNKNOWN'),
-                            'entry': pos.get('entry', 0)
+                            'side': pos.side.value if hasattr(pos.side, 'value') else str(pos.side),
+                            'entry': pos.entry_price
                         }
                     update_trading_log(
                         scan_time=current_time,

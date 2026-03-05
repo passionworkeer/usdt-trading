@@ -164,7 +164,10 @@ class BinanceExchangeInfo:
         # 从 CCXT markets 获取
         market = self.exchange.market(symbol)
 
-        # 解析信息
+        # 解析信息 - 处理 None 值
+        min_notional_val = market['limits']['cost']['min']
+        max_notional_val = market['limits']['cost'].get('max')
+
         info = SymbolInfo(
             symbol=symbol,
             base_asset=market['base'],
@@ -183,8 +186,8 @@ class BinanceExchangeInfo:
             tick_size=float(market['precision']['price']) if isinstance(market['precision']['price'], float) else 10 ** -market['precision']['price'],
 
             # 名义价值限制
-            min_notional=float(market['limits']['cost']['min']),  # 关键！200U 的生死线
-            max_notional=float(market['limits']['cost']['max']),
+            min_notional=float(min_notional_val) if min_notional_val else 5.0,  # 默认 5U
+            max_notional=float(max_notional_val) if max_notional_val else float('inf'),
 
             # 杠杆
             max_leverage=market.get('info', {}).get('maxLeverage', 125),  # Binance 合约最大 125x

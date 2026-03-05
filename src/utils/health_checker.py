@@ -265,9 +265,16 @@ class ExchangeHealthChecker:
         if not details.get('rest_api', False):
             return HealthStatus.CRITICAL
 
-        # CRITICAL: 交易权限不可用
+        # CRITICAL: 交易权限不可用（dry_run 模式下跳过）
         if not details.get('trading_allowed', False):
-            return HealthStatus.CRITICAL
+            # 检查是否为 dry_run 模式
+            import os
+            is_dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
+            if is_dry_run:
+                # dry_run 模式下，交易权限检查不通过只是警告，不阻断
+                logger.warning("⚠️ 交易权限检查失败（dry_run 模式，继续运行）")
+            else:
+                return HealthStatus.CRITICAL
 
         # UNHEALTHY: 订单簿流动性不足
         if not details.get('order_book', False):
