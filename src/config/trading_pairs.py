@@ -25,14 +25,14 @@ class TradingPairConfig:
     enabled: bool = True
 
 
-# 交易对池配置
+# 交易对池配置 - 放宽配置增加机会
 TRADING_PAIRS_POOL: List[TradingPairConfig] = [
     # 低风险 - 主流币（默认全部启用）
     TradingPairConfig('BTC/USDT', RiskLevel.LOW, 0.40, 1_000_000_000),
     TradingPairConfig('ETH/USDT', RiskLevel.LOW, 0.30, 500_000_000),
     TradingPairConfig('SOL/USDT', RiskLevel.LOW, 0.15, 200_000_000),
 
-    # 中风险 - 热门币（可选启用）
+    # 中风险 - 热门币（启用更多交易机会）
     TradingPairConfig('BNB/USDT', RiskLevel.MEDIUM, 0.10, 100_000_000),
     TradingPairConfig('XRP/USDT', RiskLevel.MEDIUM, 0.10, 200_000_000),
     TradingPairConfig('ADA/USDT', RiskLevel.MEDIUM, 0.08, 100_000_000),
@@ -41,11 +41,11 @@ TRADING_PAIRS_POOL: List[TradingPairConfig] = [
     TradingPairConfig('DOT/USDT', RiskLevel.MEDIUM, 0.06, 50_000_000),
     TradingPairConfig('MATIC/USDT', RiskLevel.MEDIUM, 0.06, 50_000_000),
 
-    # 高风险 - 潜力币（默认禁用）
-    TradingPairConfig('ARB/USDT', RiskLevel.HIGH, 0.05, 30_000_000, enabled=False),
-    TradingPairConfig('OP/USDT', RiskLevel.HIGH, 0.05, 30_000_000, enabled=False),
-    TradingPairConfig('PEPE/USDT', RiskLevel.HIGH, 0.03, 20_000_000, enabled=False),
-    TradingPairConfig('WIF/USDT', RiskLevel.HIGH, 0.03, 15_000_000, enabled=False),
+    # 高风险 - 潜力币（可选启用）
+    TradingPairConfig('ARB/USDT', RiskLevel.HIGH, 0.05, 30_000_000),
+    TradingPairConfig('OP/USDT', RiskLevel.HIGH, 0.05, 30_000_000),
+    TradingPairConfig('PEPE/USDT', RiskLevel.HIGH, 0.03, 20_000_000),
+    TradingPairConfig('WIF/USDT', RiskLevel.HIGH, 0.03, 15_000_000),
 ]
 
 
