@@ -65,16 +65,16 @@ class DegradationStrategy:
         ),
         'UNHEALTHY': DegradationAction(
             level=DegradationLevel.READ_ONLY,
-            description="交易所不健康，但仍尝试交易（已加载市场数据）",
-            allow_new_positions=True,  # 允许开仓，因为市场已加载
+            description="交易所不健康，停止新开仓，仅允许平仓",
+            allow_new_positions=False,  # 不允许新开仓
             allow_monitoring=True,
             allow_close_positions=True,  # 允许平仓止损
             check_interval_multiplier=1.5,  # 检查间隔增加
         ),
         'CRITICAL': DegradationAction(
             level=DegradationLevel.EMERGENCY_CLOSE,
-            description="交易所严重故障，但仍尝试交易（已加载市场数据）",
-            allow_new_positions=True,  # 允许开仓，因为市场已加载
+            description="交易所严重故障，停止所有交易",
+            allow_new_positions=False,  # 不允许新开仓
             allow_monitoring=True,
             allow_close_positions=True,  # 允许平仓
             check_interval_multiplier=2.0,  # 检查间隔增加
