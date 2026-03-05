@@ -565,7 +565,15 @@ class MTFResonanceLock:
         logger.info(f"是否锁定: {'🔐 三重共振已锁定' if is_locked else '❌ 共振未满足'}")
         logger.info(f"\n三重条件:")
         for i, (reason, signal) in enumerate(zip(reasons, signals), 1):
-            status = "✅" if signal == final_signal else "❌" if signal != 0 else "⚪"
+            # 修复日志显示逻辑
+            if signal == 0:
+                status = "⚪"  # 无信号
+            elif final_signal == 0:
+                status = "⚪"  # 无最终信号时，所有非零信号显示为中性
+            elif signal == final_signal:
+                status = "✅"  # 支持最终方向
+            else:
+                status = "❌"  # 与最终方向矛盾
             logger.info(f"  {status} {i}. {reason}")
 
         # 打印辅助指标
