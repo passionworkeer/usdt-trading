@@ -69,6 +69,7 @@ from src.utils.degradation_strategy import (
     DegradationLevel,
     EmergencyHandler
 )
+from src.config.trading_pairs import DEFAULT_WATCH_SYMBOLS, MEDIUM_RISK_WATCH_SYMBOLS
 
 
 def validate_config() -> None:
@@ -288,10 +289,11 @@ class SniperTrader:
             self.macro_oracle = None
             self.slippage_guard = None
 
-        # 监控的交易对（减少到3个以提高扫描速度）
-        self.watch_symbols = [
-            'BTC/USDT', 'ETH/USDT', 'SOL/USDT',   # 主流币
-        ]
+        # 监控的交易对（使用配置管理）
+        # 低风险模式：只监控主流币（BTC、ETH、SOL）
+        # 可通过环境变量扩展到中等风险币
+        include_medium = os.getenv('INCLUDE_MEDIUM_RISK', 'false').lower() == 'true'
+        self.watch_symbols = MEDIUM_RISK_WATCH_SYMBOLS if include_medium else DEFAULT_WATCH_SYMBOLS
 
         # 运行状态
         self.running = True
