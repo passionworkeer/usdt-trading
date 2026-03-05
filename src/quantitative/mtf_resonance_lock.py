@@ -494,27 +494,30 @@ class MTFResonanceLock:
         short_votes = sum(1 for s in signals if s == -1)
         no_signal_votes = sum(1 for s in signals if s == 0)
 
-        # 判断是否锁定（三重共振）
+        # 判断是否锁定 - 放宽条件增加交易机会
         is_locked = False
         final_signal = 0
         confidence = 0
 
-        if long_votes == 3:  # 全部做多
+        # 放宽：只要有 2 个及以上同方向就开仓，允许 1 个中立
+        if long_votes >= 2:  # 至少 2 个做多
             final_signal = 1
-            confidence = 1.0
+            confidence = 0.6 if long_votes == 2 else 1.0
             is_locked = True
-        elif short_votes == 3:  # 全部做空
+        elif short_votes >= 2:  # 至少 2 个做空
             final_signal = -1
-            confidence = 1.0
+            confidence = 0.6 if short_votes == 2 else 1.0
             is_locked = True
-        elif long_votes >= 2 and no_signal_votes == 0:  # 至少 2 个做多，无反对票
-            final_signal = 1
-            confidence = 0.7
-            is_locked = True
-        elif short_votes >= 2 and no_signal_votes == 0:  # 至少 2 个做空，无反对票
-            final_signal = -1
-            confidence = 0.7
-            is_locked = True
+        # 进一步放宽：1 个方向 + 1 个中立也允许
+        elif (long_votes == 1 and no_signal_votes >= 1) or (short_votes == 1 and no_signal_votes >= 1):
+            if long_votes > short_votes:
+                final_signal = 1
+                confidence = 0.4  # 降低置信度要求
+                is_locked = True
+            elif short_votes > long_votes:
+                final_signal = -1
+                confidence = 0.4
+                is_locked = True
         else:
             final_signal = 0
             confidence = 0

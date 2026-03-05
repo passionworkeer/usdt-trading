@@ -40,20 +40,20 @@ class MTFConfig:
 @dataclass
 class RiskConfig:
     """风险配置"""
-    # 仓位管理
-    max_position_pct: float = 0.40           # 最大单笔仓位 40%
-    max_total_exposure_pct: float = 0.50     # 最大总敞口 50%
+    # 仓位管理 - 放宽条件
+    max_position_pct: float = 0.50           # 最大单笔仓位 50% (原 40%)
+    max_total_exposure_pct: float = 0.60     # 最大总敞口 60% (原 50%)
     min_position_value: float = 10.0          # 最小仓位价值 10U
 
-    # 止损配置
-    stop_loss_pct: float = 0.02              # 止损 2%
-    time_stop_hours: float = 12.0            # 时间止损 12 小时
+    # 止损配置 - 放宽条件
+    stop_loss_pct: float = 0.025              # 止损 2.5% (原 2%)
+    time_stop_hours: float = 8.0            # 时间止损 8 小时 (原 12)
 
-    # 止盈配置
+    # 止盈配置 - 放宽条件
     use_trailing_stop: bool = True
-    trailing_start_pct: float = 0.02          # 2% 后开始追踪
-    trailing_distance_pct: float = 0.015     # 追踪距离 1.5%
-    min_rr_ratio: float = 2.0               # 最小盈亏比 1:2
+    trailing_start_pct: float = 0.015          # 1.5% 后开始追踪 (原 2%)
+    trailing_distance_pct: float = 0.01        # 追踪距离 1% (原 1.5%)
+    min_rr_ratio: float = 1.5               # 最小盈亏比 1:1.5 (原 1:2)
 
 
 @dataclass
