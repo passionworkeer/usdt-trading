@@ -451,6 +451,14 @@ class SimpleTrader:
             'start_time': datetime.now()
         }
 
+        # 虚拟资金组合 (200 USDT)
+        self.portfolio = {
+            'capital': 200.0,  # 初始资金 200 USDT
+            'balance': 200.0,  # 当前余额
+            'positions': {},    # 当前持仓
+            'trade_history': [], # 交易历史
+        }
+
         # 启动画面
         self.print_banner()
 
@@ -539,7 +547,7 @@ class SimpleTrader:
         return min(position_size, self.max_position_size)
 
     def check_positions(self, current_prices: dict):
-        """检查持仓状态（止损/止盈）"""
+        """检查持仓状态（止损/止盈）+ 更新虚拟组合"""
         closed_positions = []
 
         for symbol, position in list(self.positions.items()):
@@ -549,17 +557,24 @@ class SimpleTrader:
             entry_price = position['entry_price']
             current_price = current_prices[symbol]['price']
             side = position['side']
+            position_size = position.get('size', 0.1)  # 仓位比例
+            usdt_amount = position.get('usdt_amount', 100)  # 投入金额
 
             if side == 1:  # 做多
                 pnl_pct = (current_price - entry_price) / entry_price
+                pnl_usdt = usdt_amount * pnl_pct
             else:  # 做空
                 pnl_pct = (entry_price - current_price) / entry_price
+                pnl_usdt = usdt_amount * pnl_pct
 
             # 检查止损
             if pnl_pct <= -self.stop_loss_pct:
                 logger.warning(f"🔴 止损触发: {symbol} | 亏损: {pnl_pct*100:.2f}%")
                 self.stats['loss_trades'] += 1
                 self.stats['total_pnl'] += pnl_pct
+                # 更新虚拟组合
+                self.portfolio['balance'] += usdt_amount + pnl_usdt
+                self._record_trade(symbol, side, entry_price, current_price, position_size, pnl_usdt, "止损")
                 closed_positions.append(symbol)
 
             # 检查止盈
@@ -567,6 +582,9 @@ class SimpleTrader:
                 logger.info(f"🟢 止盈触发: {symbol} | 盈利: {pnl_pct*100:.2f}%")
                 self.stats['win_trades'] += 1
                 self.stats['total_pnl'] += pnl_pct
+                # 更新虚拟组合
+                self.portfolio['balance'] += usdt_amount + pnl_usdt
+                self._record_trade(symbol, side, entry_price, current_price, position_size, pnl_usdt, "止盈")
                 closed_positions.append(symbol)
 
         # 关闭持仓
@@ -575,6 +593,21 @@ class SimpleTrader:
             self.stats['total_trades'] += 1
 
         return closed_positions
+
+    def _record_trade(self, symbol: str, side: int, entry: float, exit: float, size: float, pnl: float, reason: str):
+        """记录交易到虚拟组合"""
+        trade = {
+            'time': datetime.now().strftime('%H:%M:%S'),
+            'symbol': symbol,
+            'side': '做多' if side == 1 else '做空',
+            'entry': entry,
+            'exit': exit,
+            'size': size,
+            'pnl': pnl,
+            'reason': reason,
+            'balance': self.portfolio['balance']
+        }
+        self.portfolio['trade_history'].append(trade)
 
     def get_positions_summary(self) -> str:
         """获取持仓摘要"""
@@ -623,6 +656,25 @@ class SimpleTrader:
             logger.info(f"💵 总盈亏: {self.stats['total_pnl']*100:.2f}%")
             avg_pnl = self.stats['total_pnl'] / self.stats['total_trades'] * 100
             logger.info(f"📊 平均盈亏: {avg_pnl:.2f}%")
+
+        # 虚拟组合统计
+        logger.info("-"*50)
+        logger.info("💰 虚拟组合 (200 USDT)")
+        logger.info("-"*50)
+        logger.info(f"💵 初始资金: $200.00")
+        logger.info(f"💵 当前余额: ${self.portfolio['balance']:.2f}")
+
+        # 计算当前持仓价值
+        positions_value = 0
+        # 这里可以添加当前持仓价值的计算
+        total_equity = self.portfolio['balance'] + positions_value
+
+        pnl = total_equity - 200.0
+        pnl_pct = (pnl / 200.0) * 100
+        if pnl >= 0:
+            logger.info(f"📈 总权益: ${total_equity:.2f} (+${pnl:.2f} | +{pnl_pct:.2f}%)")
+        else:
+            logger.info(f"📉 总权益: ${total_equity:.2f} (${pnl:.2f} | {pnl_pct:.2f}%)")
 
         # 持仓状态
         logger.info("-"*50)
@@ -678,29 +730,56 @@ class SimpleTrader:
                 break  # 一次只开一个仓
 
     async def execute_trade(self, signal: dict):
-        """执行交易（模拟）"""
+        """执行交易（模拟）+ 更新虚拟组合"""
         self.stats['total_signals'] += 1
         if signal['signal'] == 1:
             self.stats['long_signals'] += 1
         else:
             self.stats['short_signals'] += 1
 
-        # 计算信号强度和仓位
+        symbol = signal['symbol']
+
+        # 检查是否有反向持仓，如果有则先平仓
+        if symbol in self.positions:
+            existing = self.positions[symbol]
+            if existing['side'] != signal['signal']:
+                # 反向持仓，先平仓
+                pnl_pct = -0.01  # 假设平仓亏损 0.5%
+                pnl_usdt = existing.get('usdt_amount', 100) * pnl_pct
+
+                logger.warning(f"🔄 反向信号，平仓: {symbol} | 亏损: {pnl_pct*100:.2f}%")
+                self.portfolio['balance'] += existing.get('usdt_amount', 100) + pnl_usdt
+                self._record_trade(symbol, existing['side'], existing['entry_price'],
+                                 signal['price'], existing.get('size', 0.1), pnl_usdt, "反向平仓")
+                self.stats['loss_trades'] += 1
+                del self.positions[symbol]
+                self.stats['total_trades'] += 1
+
+        # 检查余额是否足够
         strength = self.calculate_signal_strength(signal)
         position_size = self.calculate_position_size(signal)
+        usdt_amount = self.portfolio['capital'] * position_size
+
+        if self.portfolio['balance'] < usdt_amount:
+            usdt_amount = self.portfolio['balance']  # 用尽所有余额
+            position_size = usdt_amount / self.portfolio['capital']
 
         action = "做多 📈" if signal['signal'] == 1 else "做空 📉"
-        logger.critical(f"🎯 交易信号: {signal['symbol']} {action}")
+        logger.critical(f"🎯 交易信号: {symbol} {action}")
         logger.critical(f"   价格: ${signal['price']:.2f}")
         logger.critical(f"   原因: {signal['reason']}")
         logger.critical(f"   强度: {strength:.0f}/100 ⭐{'*' * (strength//20)}")
         logger.critical(f"   仓位: {position_size*100:.1f}%")
+        logger.critical(f"   💰 投入: ${usdt_amount:.2f} USDT | 余额: ${self.portfolio['balance']:.2f}")
 
-        # 模拟开仓
-        self.positions[signal['symbol']] = {
+        # 模拟开仓 - 从余额中扣除
+        self.portfolio['balance'] -= usdt_amount
+
+        self.positions[symbol] = {
             'entry_price': signal['price'],
             'side': signal['signal'],
             'size': position_size,
+            'usdt_amount': usdt_amount,
             'strength': strength,
             'time': datetime.now()
         }
