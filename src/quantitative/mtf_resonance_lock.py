@@ -567,7 +567,7 @@ class MTFResonanceLock:
         for i, (reason, signal) in enumerate(zip(reasons, signals), 1):
             # 修复日志显示逻辑
             if signal == 0:
-                status = "⚪"  # 无信号
+                status = "⚪"  # 无信号/中性
             elif final_signal == 0:
                 status = "⚪"  # 无最终信号时，所有非零信号显示为中性
             elif signal == final_signal:
