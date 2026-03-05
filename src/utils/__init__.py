@@ -21,12 +21,12 @@ from .webhook_alerter import (
     get_alerter,
 )
 
-# Session 管理（v6.0 新增）
-from .session_manager import (
-    GlobalSessionManager,
-    get_session_manager,
-    close_session_manager,
-)
+# Session 管理（v6.0 新增）- 暂时禁用，正在修复 aiohttp 问题
+# from .session_manager import (
+#     GlobalSessionManager,
+#     get_session_manager,
+#     close_session_manager,
+# )
 
 # 系统锁（v6.0 新增）
 from .system_lock import (
@@ -64,10 +64,10 @@ __all__ = [
     'AlertType',
     'AlertMessage',
     'get_alerter',
-    # Session 管理
-    'GlobalSessionManager',
-    'get_session_manager',
-    'close_session_manager',
+    # Session 管理（暂时禁用）
+    # 'GlobalSessionManager',
+    # 'get_session_manager',
+    # 'close_session_manager',
     # 系统锁
     'WindowsSystemLock',
     'get_system_lock',

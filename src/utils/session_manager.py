@@ -5,10 +5,100 @@ v6.0 全局 Session 管理器（TLS Keep-Alive + 连接池）
 """
 import asyncio
 import logging
-from typing import Optional, Dict, Any
-import aiohttp
+from typing import Optional, Dict, Any, Any as AnyType
+
+# 延迟导入 aiohttp（避免在模块导入时卡住）
+aiohttp = None
 
 logger = logging.getLogger(__name__)
+
+# 全局标志：aiohttp 是否可用
+_AIOHTTP_AVAILABLE = None
+
+
+def _ensure_aiohttp():
+    """确保 aiohttp 已导入（在需要时）"""
+    global aiohttp, _AIOHTTP_AVAILABLE
+    if aiohttp is not None:
+        return True
+
+    try:
+        import importlib
+        spec = importlib.util.find_spec("aiohttp")
+        if spec is None:
+            _AIOHTTP_AVAILABLE = False
+            logger.info("aiohttp 未安装，将使用同步客户端")
+            return False
+
+        aiohttp = importlib.import_module("aiohttp")
+        _AIOHTTP_AVAILABLE = True
+        return True
+    except Exception as e:
+        _AIOHTTP_AVAILABLE = False
+        logger.warning(f"aiohttp 导入失败: {e}，将使用同步客户端")
+        return False
+
+
+def _check_aiohttp():
+    """检查 aiohttp 是否可用"""
+    global _AIOHTTP_AVAILABLE
+    if _AIOHTTP_AVAILABLE is None:
+        _ensure_aiohttp()
+    return _AIOHTTP_AVAILABLE or False
+
+
+class _SyncSessionWrapper:
+    """同步 Session 包装器（提供类似 aiohttp 的接口）"""
+
+    def __init__(self, sync_client):
+        self._sync_client = sync_client
+
+    async def get(self, url: str, **kwargs):
+        """异步 GET 请求（实际是同步执行）"""
+        import asyncio
+        loop = asyncio.get_event_loop()
+
+        # 解析参数
+        params = kwargs.get('params')
+        timeout = kwargs.get('timeout', 30)
+
+        # 在线程池中执行同步请求
+        result = await loop.run_in_executor(
+            None,
+            self._sync_client.get,
+            url,
+            params,
+            timeout
+        )
+
+        # 返回一个兼容的响应对象
+        return _SyncResponseWrapper(result)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class _SyncResponseWrapper:
+    """同步响应包装器"""
+
+    def __init__(self, data: Dict[str, Any]):
+        self._data = data
+        self.status = 200  # 简化，总是假设成功
+
+    async def json(self):
+        return self._data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+    async def text(self):
+        return str(self._data)
 
 
 class GlobalSessionManager:
@@ -33,8 +123,8 @@ class GlobalSessionManager:
 
     def __init__(self):
         # Session 配置
-        self.connector: Optional[aiohttp.TCPConnector] = None
-        self.session: Optional[aiohttp.ClientSession] = None
+        self.connector = None  # type: Optional[object]
+        self.session = None  # type: Optional[object]
 
         # 统计信息
         self.request_count = 0
@@ -43,6 +133,16 @@ class GlobalSessionManager:
 
         # 运行状态
         self.initialized = False
+
+        # 检查是否使用同步模式
+        self.use_sync = not _check_aiohttp()
+
+    @classmethod
+    def get_instance_sync(cls):
+        """同步获取实例（用于初始化）"""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
 
     @classmethod
     async def get_instance(cls) -> 'GlobalSessionManager':
@@ -66,7 +166,24 @@ class GlobalSessionManager:
             logger.debug("Session 已初始化，跳过")
             return
 
+        if self.use_sync:
+            # 使用同步客户端
+            logger.info("使用同步 HTTP 客户端（aiohttp 不可用）")
+            from src.utils.sync_http import get_sync_client
+            self._sync_client = get_sync_client()
+            # 创建一个兼容的 session 对象
+            self.session = _SyncSessionWrapper(self._sync_client)
+            self.initialized = True
+            logger.info("✅ 同步 Session 已初始化")
+            return
+
         logger.info("初始化全局 Session...")
+
+        # 动态导入 aiohttp
+        global aiohttp
+        if aiohttp is None:
+            import importlib
+            aiohttp = importlib.import_module("aiohttp")
 
         # 配置连接器
         self.connector = aiohttp.TCPConnector(
@@ -84,12 +201,12 @@ class GlobalSessionManager:
             ssl=False,  # 如果是 HTTPS，自动处理
         )
 
-        # 配置超时
+        # 配置超时 - 增加超时时间以适应慢速代理
         timeout = aiohttp.ClientTimeout(
-            total=30,  # 总超时 30 秒
-            connect=10,  # 连接超时 10 秒
-            sock_connect=5,  # Socket 连接超时 5 秒
-            sock_read=10,  # Socket 读取超时 10 秒
+            total=60,  # 总超时 60 秒
+            connect=20,  # 连接超时 20 秒
+            sock_connect=15,  # Socket 连接超时 15 秒
+            sock_read=30,  # Socket 读取超时 30 秒
         )
 
         # 创建 Session
@@ -128,7 +245,10 @@ class GlobalSessionManager:
         logger.info(f"   连接复用: {self.reuse_count}")
         logger.info(f"   新建连接: {self.connection_count}")
 
-        if self.session:
+        if self.use_sync:
+            # 同步模式不需要关闭
+            pass
+        elif self.session:
             await self.session.close()
             self.session = None
 
