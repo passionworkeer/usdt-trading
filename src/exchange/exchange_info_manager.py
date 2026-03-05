@@ -67,8 +67,13 @@ class BinanceExchangeInfo:
         self.testnet = testnet
         self.symbol_info_cache: Dict[str, SymbolInfo] = {}
 
+        # 代理配置
+        proxy = os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY') or os.environ.get('ALL_PROXY')
+        if proxy:
+            logger.info(f"✅ CCXT 使用代理: {proxy}")
+
         # 初始化 CCXT
-        self.exchange = ccxt.binance({
+        ccxt_options = {
             'apiKey': os.getenv('BINANCE_API_KEY'),
             'secret': os.getenv('BINANCE_API_SECRET'),
             'enableRateLimit': True,
@@ -76,8 +81,22 @@ class BinanceExchangeInfo:
                 'defaultType': 'future',
                 # v6.1: 禁用 CCXT 的默认时间同步，使用我们自己的
                 'adjustForTimeDifference': False,  # 我们自己管理时间偏移
+                # 禁用 fetch_currencies，避免 testnet 不支持 sapi 的问题
+                'fetchCurrencies': False,
+                # 禁用 margin pairs 查询
+                'fetchMarginModes': False,
+                # 禁用 fetch Borrow/Loan (Cross)
+                'fetchCrossBorrowRate': False,
             },
-        })
+        }
+
+        # 只设置 httpsProxy（不要同时设置 httpProxy 和 httpsProxy）
+        if proxy:
+            # 移除 http:// 或 https:// 前缀
+            proxy_host = proxy.replace('http://', '').replace('https://', '')
+            ccxt_options['httpsProxy'] = f'http://{proxy_host}'
+
+        self.exchange = ccxt.binance(ccxt_options)
 
         if testnet:
             self.exchange.urls['api'] = {
@@ -86,8 +105,44 @@ class BinanceExchangeInfo:
             }
 
         # 加载市场
-        self.exchange.load_markets()
-        logger.info(f"✅ 已加载 {len(self.exchange.markets)} 个交易对规则")
+        try:
+            self.exchange.load_markets()
+            logger.info(f"✅ 已加载 {len(self.exchange.markets)} 个交易对规则")
+        except Exception as e:
+            logger.warning(f"⚠️ 加载市场失败: {e}，使用默认市场数据")
+            # 使用默认市场数据（针对 200U 常用的交易对）
+            self.exchange.markets = {
+                'BTC/USDT:USDT': {
+                    'id': 'BTCUSDT',
+                    'symbol': 'BTC/USDT:USDT',
+                    'base': 'BTC',
+                    'quote': 'USDT',
+                    'active': True,
+                    'precision': {'amount': 3, 'price': 2},
+                    'limits': {
+                        'amount': {'min': 0.001, 'max': 100},
+                        'price': {'min': 1000, 'max': 100000},
+                        'cost': {'min': 5, 'max': 1000000},
+                    },
+                    'info': {},
+                },
+                'ETH/USDT:USDT': {
+                    'id': 'ETHUSDT',
+                    'symbol': 'ETH/USDT:USDT',
+                    'base': 'ETH',
+                    'quote': 'USDT',
+                    'active': True,
+                    'precision': {'amount': 3, 'price': 2},
+                    'limits': {
+                        'amount': {'min': 0.01, 'max': 1000},
+                        'price': {'min': 100, 'max': 10000},
+                        'cost': {'min': 5, 'max': 1000000},
+                    },
+                    'info': {},
+                },
+            }
+            self.exchange.markets_by_id = {k.upper(): v for k, v in self.exchange.markets.items()}
+            logger.info(f"✅ 已加载 {len(self.exchange.markets)} 个默认交易对规则")
 
         # v6.1: 初始化时间同步管理器
         self.time_sync_manager = None

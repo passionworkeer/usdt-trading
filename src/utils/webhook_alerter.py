@@ -26,6 +26,7 @@ class AlertType(Enum):
     TIME_STOP = "TIME_STOP"  # 12 小时时间止损
     TRAILING_STOP = "TRAILING_STOP"  # 移动止盈完成
     EMERGENCY_CLOSE = "EMERGENCY_CLOSE"  # 紧急平仓
+    SYSTEM_WARNING = "SYSTEM_WARNING"  # 系统警告
 
 
 @dataclass
@@ -99,6 +100,7 @@ class WebhookAlerter:
             AlertType.TIME_STOP: "⏱️",
             AlertType.TRAILING_STOP: "💰",
             AlertType.EMERGENCY_CLOSE: "🚨",
+            AlertType.SYSTEM_WARNING: "⚠️",
         }
 
         emoji = emojis.get(alert.alert_type, "📊")
@@ -462,6 +464,34 @@ class WebhookAlerter:
             message=message,
             details={
                 "原因": reason,
+            }
+        )
+
+        return await self.send_alert(alert)
+
+    async def alert_system_warning(
+        self,
+        title: str,
+        message: str
+    ) -> bool:
+        """
+        预警：系统警告
+
+        Args:
+            title: 警告标题
+            message: 警告消息
+
+        Returns:
+            是否发送成功
+        """
+        alert = AlertMessage(
+            alert_type=AlertType.SYSTEM_WARNING,
+            symbol="",
+            side="",
+            message=f"{title}\n{message}",
+            details={
+                "title": title,
+                "message": message,
             }
         )
 
