@@ -257,7 +257,7 @@ class GlobalSessionManager:
 
         logger.info("✅ 全局 Session 已关闭")
 
-    async def get(self, url: str, **kwargs) -> aiohttp.ClientResponse:
+    async def get(self, url: str, **kwargs) -> 'aiohttp.ClientResponse':
         """
         GET 请求
 
@@ -286,7 +286,7 @@ class GlobalSessionManager:
             logger.error(f"GET 请求失败: {url}, {e}")
             raise
 
-    async def post(self, url: str, **kwargs) -> aiohttp.ClientResponse:
+    async def post(self, url: str, **kwargs) -> 'aiohttp.ClientResponse':
         """
         POST 请求
 
@@ -309,7 +309,7 @@ class GlobalSessionManager:
             logger.error(f"POST 请求失败: {url}, {e}")
             raise
 
-    async def _ensure_session(self) -> aiohttp.ClientSession:
+    async def _ensure_session(self) -> 'aiohttp.ClientSession':
         """确保 Session 已初始化"""
         if not self.initialized or self.session is None:
             await self.initialize()

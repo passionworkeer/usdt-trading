@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,32 @@ class ExchangeHealthChecker:
         }
 
         logger.info("✅ 交易所健康检查器已初始化")
+
+    async def _safe_exchange_call(self, method_name: str, *args, **kwargs):
+        """
+        安全地调用 exchange 方法（自动处理同步/异步）
+
+        Args:
+            method_name: 方法名
+            *args: 位置参数
+            **kwargs: 关键字参数
+
+        Returns:
+            方法返回值
+        """
+        method = getattr(self.exchange, method_name)
+        if asyncio.iscoroutinefunction(method):
+            # 异步方法，直接 await
+            return await method(*args, **kwargs)
+        else:
+            # 同步方法，在线程池中执行以避免阻塞
+            loop = asyncio.get_event_loop()
+            # 使用 partial 绑定关键字参数
+            if kwargs:
+                func = partial(method, *args, **kwargs)
+                return await loop.run_in_executor(None, func)
+            else:
+                return await loop.run_in_executor(None, method, *args)
 
     async def health_check(self) -> HealthCheckResult:
         """
@@ -149,10 +176,10 @@ class ExchangeHealthChecker:
 
             # 尝试获取服务器时间（最轻量的 API 调用）
             if hasattr(self.exchange, 'fetch_time'):
-                await self.exchange.fetch_time()
+                await self._safe_exchange_call('fetch_time')
             else:
                 # fallback: 获取 ticker
-                await self.exchange.fetch_ticker(self.test_symbols[0])
+                await self._safe_exchange_call('fetch_ticker', self.test_symbols[0])
 
             latency = (time.time() - start_time) * 1000
 
@@ -178,7 +205,7 @@ class ExchangeHealthChecker:
             start_time = time.time()
 
             # 尝试获取账户余额
-            await self.exchange.fetch_balance()
+            await self._safe_exchange_call('fetch_balance')
 
             latency = (time.time() - start_time) * 1000
 
@@ -201,7 +228,7 @@ class ExchangeHealthChecker:
 
             # 获取订单簿（只获取少量数据）
             symbol = self.test_symbols[0]
-            order_book = await self.exchange.fetch_order_book(symbol, limit=5)
+            order_book = await self._safe_exchange_call('fetch_order_book', symbol, limit=5)
 
             latency = (time.time() - start_time) * 1000
 

@@ -2,10 +2,44 @@
 日志工具
 """
 import os
+import sys
 import logging
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from typing import Optional
+
+
+class SafeConsoleHandler(logging.StreamHandler):
+    """
+    安全的控制台处理器，在 Windows 下能正确处理 Unicode 字符
+    """
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # 确保 msg 是字符串类型
+            if not isinstance(msg, str):
+                msg = str(msg)
+
+            # 在 Windows 下处理 Unicode 编码问题
+            if sys.platform == 'win32':
+                # 尝试使用 UTF-8 编码输出
+                try:
+                    # 尝试直接写入（如果终端支持 UTF-8）
+                    self.stream.write(msg + self.terminator)
+                    self.flush()
+                except UnicodeEncodeError:
+                    # 回退到 ASCII 安全模式：移除或替换非 ASCII 字符
+                    safe_msg = msg.encode('ascii', 'replace').decode('ascii')
+                    self.stream.write(safe_msg + self.terminator)
+                    self.flush()
+            else:
+                # 非 Windows 系统直接输出
+                self.stream.write(msg + self.terminator)
+                self.flush()
+
+        except Exception:
+            self.handleError(record)
 
 
 def setup_logger(name: str,
@@ -39,8 +73,8 @@ def setup_logger(name: str,
         datefmt='%Y-%m-%d %H:%M:%S'
     )
 
-    # 控制台处理器
-    console_handler = logging.StreamHandler()
+    # 控制台处理器 - 使用安全的处理器处理 Unicode
+    console_handler = SafeConsoleHandler()
     console_handler.setLevel(getattr(logging, level.upper()))
     console_handler.setFormatter(formatter)
     logger.addHandler(console_handler)

@@ -116,12 +116,15 @@ load_dotenv()
 # 确保 logs 目录存在
 Path('logs').mkdir(exist_ok=True)
 
+# 导入安全的控制台处理器
+from src.utils.logger import SafeConsoleHandler
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(name)s] - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('logs/sniper_trader.log'),
-        logging.StreamHandler()
+        logging.FileHandler('logs/sniper_trader.log', encoding='utf-8'),
+        SafeConsoleHandler()  # 使用安全的控制台处理器处理 Unicode
     ]
 )
 logger = logging.getLogger(__name__)
