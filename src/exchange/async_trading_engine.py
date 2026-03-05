@@ -118,7 +118,8 @@ class AsyncFeedHandler:
                                     self.event_queue.get_nowait()
                                     self.event_queue.put_nowait(event)
                                     self.messages_dropped += 1
-                                except:
+                                except Exception:
+                                    # 队列操作失败，忽略此消息
                                     pass
 
                 except Exception as e:

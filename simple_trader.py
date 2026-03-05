@@ -810,8 +810,9 @@ class SimpleTrader:
                     content = log_file.read_text(encoding='utf-8')
                 else:
                     content = ""
-            except:
-                # 编码问题，重新创建文件
+            except (OSError, UnicodeDecodeError) as e:
+                # 文件读取或编码问题，重新创建文件
+                logger.debug(f"读取日志文件失败: {e}")
                 content = ""
 
             today = datetime.now().strftime("%Y-%m-%d")
@@ -834,7 +835,8 @@ class SimpleTrader:
             try:
                 backup_file.write_text(new_entry, encoding='utf-8')
                 logger.info(f"✅ 备份日志已保存: {backup_file.name}")
-            except:
+            except (OSError, IOError) as backup_error:
+                logger.debug(f"备份日志失败: {backup_error}")
                 pass
 
     async def run(self):

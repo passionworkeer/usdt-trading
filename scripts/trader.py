@@ -26,7 +26,8 @@ def load_state():
     try:
         with open(STATE_FILE) as f:
             return json.load(f)
-    except:
+    except (FileNotFoundError, json.JSONDecodeError, OSError) as e:
+        logger.debug(f"加载状态失败: {e}，使用默认状态")
         return {'capital': 226.3, 'positions': {}, 'trades': []}
 
 def save_state(state):
@@ -39,7 +40,8 @@ def get_price(symbol):
                         params={'symbol': symbol},
                         proxies=PROXIES, timeout=5, verify=False)
         return float(r.json()['lastPrice'])
-    except:
+    except (requests.RequestException, ValueError, KeyError) as e:
+        logger.debug(f"获取 {symbol} 价格失败: {e}")
         return None
 
 def scan_market():
@@ -76,7 +78,8 @@ def scan_market():
                     'change': change,
                     'high_20d': high_20d
                 })
-        except:
+        except (requests.RequestException, ValueError, KeyError, IndexError) as e:
+            logger.debug(f"扫描 {sym} 失败: {e}")
             pass
 
     return opportunities

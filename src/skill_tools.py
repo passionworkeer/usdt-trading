@@ -201,7 +201,8 @@ async def crypto_get_positions(symbol: Optional[str] = None) -> dict:
                 try:
                     ticker = _state.order_executor.get_ticker(symbol)
                     current_price = ticker['last']
-                except:
+                except Exception as e:
+                    logger.debug(f"获取 {symbol} 价格失败: {e}")
                     current_price = None
 
                 positions.append({

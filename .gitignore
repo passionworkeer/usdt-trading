@@ -43,6 +43,11 @@ ENV/
 logs/
 *.log
 
+# Test coverage
+htmlcov/
+.coverage
+.pytest_cache/
+
 # State persistence (trading data, positions, etc.)
 state/
 state/*.json

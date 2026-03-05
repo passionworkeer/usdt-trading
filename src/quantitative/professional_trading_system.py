@@ -811,8 +811,8 @@ class AIParameterOptimizer:
             try:
                 import anthropic
                 self.client = anthropic.Anthropic(api_key=self.api_key)
-            except:
-                logger.warning("Claude API 初始化失败，将使用默认参数")
+            except (ImportError, Exception) as e:
+                logger.warning(f"Claude API 初始化失败: {e}，将使用默认参数")
 
         # 当前参数配置
         self.current_params = {
