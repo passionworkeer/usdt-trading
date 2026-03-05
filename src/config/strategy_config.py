@@ -18,23 +18,23 @@ class StrategyMode(Enum):
 @dataclass
 class MTFConfig:
     """MTF 三重共振配置"""
-    # 4H 趋势确认
+    # 4H 趋势确认 - 放宽条件
     require_4h_trend: bool = True
-    allow_sideways_4h: bool = False  # 是否允许横盘
+    allow_sideways_4h: bool = True   # 允许横盘时根据价格方向交易 (原 False)
 
     # 动量确认
     price_change_threshold: float = 0.005  # 0.5% 价格变化阈值
     max_momentum_deviation: float = 0.02   # 最大动量偏离 2%
 
-    # 15m 放量确认
-    base_volume_threshold: float = 2.0     # 基础成交量阈值 2x
+    # 15m 放量确认 - 放宽条件增加交易机会
+    base_volume_threshold: float = 1.5     # 基础成交量阈值 1.5x (原 2.0x)
     use_dynamic_threshold: bool = True      # 使用动态阈值
-    min_volume_threshold: float = 1.8        # 最小成交量阈值
+    min_volume_threshold: float = 1.2        # 最小成交量阈值 (原 1.8)
 
-    # RSI 过滤
-    rsi_oversold: float = 30.0            # RSI 超卖阈值
-    rsi_overbought: float = 70.0            # RSI 超买阈值
-    use_rsi_filter: bool = True             # 使用 RSI 过滤
+    # RSI 过滤 - 放宽条件
+    rsi_oversold: float = 25.0            # RSI 超卖阈值 (原 30)
+    rsi_overbought: float = 75.0            # RSI 超买阈值 (原 70)
+    use_rsi_filter: bool = False            # 禁用 RSI 过滤，使用其他指标
 
 
 @dataclass

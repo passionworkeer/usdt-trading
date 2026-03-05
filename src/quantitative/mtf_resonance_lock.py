@@ -161,13 +161,29 @@ class MTFResonanceLock:
                 ema50 = df['close'].ewm(span=50).mean().iloc[-1]
                 current_price = df['close'].iloc[-1]
 
-                # 判断趋势
+                # 计算 EMA 差距百分比
+                ema_diff_pct = (ema20 - ema50) / ema50 * 100
+
+                # 计算近期价格变动
+                price_change_4h = (current_price - df['close'].iloc[-4]) / df['close'].iloc[-4] * 100 if len(df) >= 4 else 0
+
+                # 判断趋势 - 放宽条件
                 if ema20 > ema50 and current_price > ema20:
+                    # 明确多头
                     trend = 1
                     reason = f"4H 多头趋势：EMA20 (${ema20:.2f}) > EMA50 (${ema50:.2f})，价格 (${current_price:.2f}) > EMA20"
                 elif ema20 < ema50 and current_price < ema20:
+                    # 明确空头
                     trend = -1
                     reason = f"4H 空头趋势：EMA20 (${ema20:.2f}) < EMA50 (${ema50:.2f})，价格 (${current_price:.2f}) < EMA20"
+                elif abs(ema_diff_pct) < 1.0 and abs(price_change_4h) > 0.5:
+                    # 横盘时根据价格方向给出弱信号 (放宽条件)
+                    if price_change_4h > 0:
+                        trend = 1
+                        reason = f"4H 横盘偏多：价格 4H 上涨 {price_change_4h:.2f}%，EMA 收敛"
+                    else:
+                        trend = -1
+                        reason = f"4H 横盘偏空：价格 4H 下跌 {abs(price_change_4h):.2f}%，EMA 收敛"
                 else:
                     trend = 0
                     reason = f"4H 趋势不明确：EMA20 ({ema20:.2f}) vs EMA50 ({ema50:.2f})"
