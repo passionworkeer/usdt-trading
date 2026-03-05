@@ -41,9 +41,9 @@ class MTFConfig:
 class RiskConfig:
     """风险配置"""
     # 仓位管理 - 放宽条件
-    max_position_pct: float = 0.50           # 最大单笔仓位 50% (原 40%)
-    max_total_exposure_pct: float = 0.60     # 最大总敞口 60% (原 50%)
-    min_position_value: float = 10.0          # 最小仓位价值 10U
+    max_position_pct: float = 0.50           # 最大单笔仓位 50%
+    max_total_exposure_pct: float = 0.60     # 最大总敞口 60%
+    min_position_value: float = 5.0          # 最小仓位价值 5U (原 10U)
 
     # 止损配置 - 放宽条件
     stop_loss_pct: float = 0.025              # 止损 2.5% (原 2%)
@@ -63,9 +63,9 @@ class ExecutionConfig:
     order_type: str = "limit"                # limit / market
     post_only: bool = True                   # 只做 Maker
 
-    # 滑点保护
-    max_slippage_pct: float = 0.005          # 最大滑点 0.5%
-    slippage_check_timeout: float = 5.0      # 滑点检查超时 5 秒
+    # 滑点保护 - 放宽条件
+    max_slippage_pct: float = 0.01          # 最大滑点 1% (原 0.5%)
+    slippage_check_timeout: float = 3.0      # 滑点检查超时 3 秒 (原 5)
 
     # 重试配置
     max_retries: int = 3                      # 最大重试次数
