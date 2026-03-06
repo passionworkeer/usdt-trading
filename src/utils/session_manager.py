@@ -5,6 +5,7 @@ v6.0 全局 Session 管理器（TLS Keep-Alive + 连接池）
 """
 import asyncio
 import logging
+import os
 from typing import Optional, Dict, Any, Any as AnyType
 
 # 延迟导入 aiohttp（避免在模块导入时卡住）
@@ -14,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 # 全局标志：aiohttp 是否可用
 _AIOHTTP_AVAILABLE = None
+
+# v6.1: 显式设置代理
+PROXY = os.environ.get('HTTP_PROXY') or os.environ.get('HTTPS_PROXY') or os.environ.get('ALL_PROXY') or ''
+if PROXY:
+    logger.info(f"Session Manager 代理配置: {PROXY}")
 
 
 def _ensure_aiohttp():
@@ -210,13 +216,21 @@ class GlobalSessionManager:
         )
 
         # 创建 Session
-        self.session = aiohttp.ClientSession(
-            connector=self.connector,
-            timeout=timeout,
-            # 自动解码 JSON
-            raise_for_status=False,  # 不自动抛出 HTTP 错误（由调用方处理）
-            # 信任环境（代理等）
-            trust_env=True,
+        session_kwargs = {
+            'connector': self.connector,
+            'timeout': timeout,
+            'raise_for_status': False,
+            'trust_env': True,
+        }
+
+        # v6.1: 如果配置了代理，显式设置
+        if PROXY:
+            # aiohttp 需要把 http:// 前缀去掉
+            proxy_clean = PROXY.replace('http://', '').replace('https://', '')
+            session_kwargs['proxy'] = f'http://{proxy_clean}'
+            logger.info(f"Session 使用代理: {PROXY}")
+
+        self.session = aiohttp.ClientSession(**session_kwargs)
         )
 
         self.initialized = True
