@@ -565,17 +565,18 @@ class MTFResonanceLock:
 
         # 判断是否允许开仓
         allow_entry = True  # 默认允许，给机会
+        rr_str = f"{risk_reward_ratio:.1f}:1" if risk_reward_ratio else "N/A"
 
         if risk_reward_ratio is not None and risk_reward_ratio < dynamic_rr_requirement:
             # 风报比不足，但如果是高波动市场，给机会入场
             if market_volatility > 0.03:  # 波动 > 3%，放宽要求
-                logger.info(f"📊 市场波动大 ({market_volatility*100:.1f}%)，风报比 {risk_reward_ratio:.1f}:1 不足但允许入场")
+                logger.info(f"📊 市场波动大 ({market_volatility*100:.1f}%)，风报比 {rr_str} 不足但允许入场")
                 allow_entry = True
             else:
-                logger.warning(f"⚠️ 风报比 {risk_reward_ratio:.1f}:1 < 要求 {dynamic_rr_requirement:.1f}:1，放弃入场")
+                logger.warning(f"⚠️ 风报比 {rr_str} < 要求 {dynamic_rr_requirement:.1f}:1，放弃入场")
                 allow_entry = False
-        else:
-            logger.info(f"✅ 风报比检查通过: {risk_reward_ratio:.1f}:1 >= {dynamic_rr_requirement:.1f}:1")
+        elif risk_reward_ratio is not None:
+            logger.info(f"✅ 风报比检查通过: {rr_str} >= {dynamic_rr_requirement:.1f}:1")
 
         # 应用判断结果
         if not allow_entry:
