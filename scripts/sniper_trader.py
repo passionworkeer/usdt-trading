@@ -69,7 +69,7 @@ from src.utils.degradation_strategy import (
     DegradationLevel,
     EmergencyHandler
 )
-from src.config.trading_pairs import DEFAULT_WATCH_SYMBOLS, MEDIUM_RISK_WATCH_SYMBOLS
+from src.config.trading_pairs import DEFAULT_WATCH_SYMBOLS, MEDIUM_RISK_WATCH_SYMBOLS, get_active_symbols
 
 
 def validate_config() -> None:
@@ -295,10 +295,10 @@ class SniperTrader:
             self.slippage_guard = None
 
         # 监控的交易对（使用配置管理）
-        # 低风险模式：只监控主流币（BTC、ETH、SOL）
-        # 可通过环境变量扩展到中等风险币
-        include_medium = os.getenv('INCLUDE_MEDIUM_RISK', 'false').lower() == 'true'
-        self.watch_symbols = MEDIUM_RISK_WATCH_SYMBOLS if include_medium else DEFAULT_WATCH_SYMBOLS
+        # 默认监控全部 15 个交易对（低+中+高风险）
+        include_medium = os.getenv('INCLUDE_MEDIUM_RISK', 'true').lower() == 'true'
+        include_high = os.getenv('INCLUDE_HIGH_RISK', 'true').lower() == 'true'
+        self.watch_symbols = get_active_symbols(include_medium=include_medium, include_high=include_high)
 
         # 运行状态
         self.running = True
