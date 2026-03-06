@@ -411,7 +411,7 @@ class MTFResonanceLock:
                                  f"上涨 {price_change_pct:.2%} | RSI: {rsi_value:.1f} | BB位置: {bb_position:.0%} | ATR: {atr:.2f}"
                                  f"{rsi_filter}{bb_filter} → 做多信号")
 
-                        # 建议入场价 = VWAP（等待回踩）
+                        # 入场信息（带波动率用于动态风报比）
                         entry_info = {
                             'breakthrough_price': current_price,
                             'breakthrough_vwap': vwap,
@@ -420,6 +420,7 @@ class MTFResonanceLock:
                             'rsi': rsi_value,
                             'bb_position': bb_position,
                             'atr': atr,
+                            'volatility': atr_pct,  # 用于动态风报比判断
                         }
                         reason += f" | 建议等待回踩 VWAP ${vwap:.2f} 入场"
 
@@ -429,7 +430,7 @@ class MTFResonanceLock:
                                  f"下跌 {abs(price_change_pct):.2%} | RSI: {rsi_value:.1f} | BB位置: {bb_position:.0%} | ATR: {atr:.2f}"
                                  f"{rsi_filter}{bb_filter} → 做空信号")
 
-                        # 建议入场价 = VWAP（等待回踩）
+                        # 入场信息（带波动率用于动态风报比）
                         entry_info = {
                             'breakthrough_price': current_price,
                             'breakthrough_vwap': vwap,
@@ -438,6 +439,7 @@ class MTFResonanceLock:
                             'rsi': rsi_value,
                             'bb_position': bb_position,
                             'atr': atr,
+                            'volatility': atr_pct,  # 用于动态风报比判断
                         }
                         reason += f" | 建议等待回踩 VWAP ${vwap:.2f} 入场"
 
@@ -551,28 +553,32 @@ class MTFResonanceLock:
                 reward = abs(take_profit_price - entry_price)
                 risk_reward_ratio = reward / risk if risk > 0 else 0
 
-        # === v5.2: 风报比检查（必须在计算风控信息之后）===
-        if risk_reward_ratio is not None and risk_reward_ratio < 2.0:
-            logger.warning(f"⚠️ 风报比不足 2:1（当前 {risk_reward_ratio:.1f}:1），不执行开仓")
-            is_locked = False
-            final_signal = 0
-            confidence = 0
+        # === v5.2: 风报比检查 - 根据市场情况动态调整 ===
+        # 核心思路：不再死卡风报比，而是根据市场波动率灵活判断
+        # 高波动市场 → 降低风报比要求，允许入场
+        # 低波动市场 → 提高风报比要求，减少入场
 
-        # === v5.2: 风报比检查 ===
-        risk_reward_ok = True
-        if risk_reward_ratio is not None and risk_reward_ratio < 2.0:
-            risk_reward_ok = False
-            logger.warning(f"⚠️ 风报比不足 2:1（当前 {risk_reward_ratio:.1f}:1），不执行开仓")
+        market_volatility = entry_info.get('volatility', 0.02) if entry_info else 0.02
 
-        # 重新判断锁定状态
-        if not risk_reward_ratio:
-            # 没有计算出风报比，继续执行
-            pass
-        elif risk_reward_ok:
-            # 风报比够，保持锁定状态
-            pass
+        # 根据波动率动态调整：波动率 2% 时要求 1:1，波动率 4% 时要求 2:1
+        dynamic_rr_requirement = max(0.8, min(2.0, market_volatility * 50))
+
+        # 判断是否允许开仓
+        allow_entry = True  # 默认允许，给机会
+
+        if risk_reward_ratio is not None and risk_reward_ratio < dynamic_rr_requirement:
+            # 风报比不足，但如果是高波动市场，给机会入场
+            if market_volatility > 0.03:  # 波动 > 3%，放宽要求
+                logger.info(f"📊 市场波动大 ({market_volatility*100:.1f}%)，风报比 {risk_reward_ratio:.1f}:1 不足但允许入场")
+                allow_entry = True
+            else:
+                logger.warning(f"⚠️ 风报比 {risk_reward_ratio:.1f}:1 < 要求 {dynamic_rr_requirement:.1f}:1，放弃入场")
+                allow_entry = False
         else:
-            # 风报比不够，解锁
+            logger.info(f"✅ 风报比检查通过: {risk_reward_ratio:.1f}:1 >= {dynamic_rr_requirement:.1f}:1")
+
+        # 应用判断结果
+        if not allow_entry:
             is_locked = False
             final_signal = 0
             confidence = 0
