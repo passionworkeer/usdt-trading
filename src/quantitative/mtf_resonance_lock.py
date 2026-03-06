@@ -349,10 +349,10 @@ class MTFResonanceLock:
                 atr = df['tr'].iloc[-14:].mean()  # 14 周期 ATR
                 atr_pct = (atr / current_price) if current_price > 0 else 0
 
-                # === v5.2 新增：动态成交量阈值 ===
-                # 波动率高时提高阈值
-                volatility_factor = min(atr_pct * 10, 1.0)  # 波动率系数
-                dynamic_volume_threshold = 2.0 + volatility_factor  # 动态阈值
+                # === 动态成交量阈值 - 放宽条件 ===
+                # 波动率高时适当提高阈值，但使用更低的基数
+                volatility_factor = min(atr_pct * 10, 0.5)  # 波动率系数
+                dynamic_volume_threshold = 1.2 + volatility_factor  # 动态阈值 1.2x-1.7x
 
                 # === v5.2 新增：RSI 计算 ===
                 delta = df['close'].diff()
