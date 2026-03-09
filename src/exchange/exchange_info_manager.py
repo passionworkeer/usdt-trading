@@ -18,6 +18,9 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# v6.2: 延迟导入 FreeDataSource，避免启动时卡住
+FreeDataSource = None
+
 
 @dataclass
 class SymbolInfo:
@@ -146,6 +149,99 @@ class BinanceExchangeInfo:
 
         # v6.1: 初始化时间同步管理器
         self.time_sync_manager = None
+
+        # v6.2: 初始化免费数据源（备选方案）
+        self._free_data_source = None
+        self._free_data_loop = None
+
+    def _get_free_data_source(self):
+        """延迟加载 FreeDataSource"""
+        global FreeDataSource
+        if self._free_data_source is None:
+            try:
+                from src.data_sources.free_data import FreeDataSource as _FDS
+                FreeDataSource = _FDS
+                self._free_data_source = _FDS()
+                logger.info("✅ 已初始化免费数据源作为备选")
+            except Exception as e:
+                logger.warning(f"⚠️ 初始化免费数据源失败: {e}")
+        return self._free_data_source
+
+    def fetch_ticker(self, symbol: str) -> dict:
+        """
+        获取行情（优先 CCXT，失败时使用免费数据源）
+
+        Args:
+            symbol: 交易对（如 'BTC/USDT'）
+
+        Returns:
+            类似 CCXT 的 ticker 字典
+        """
+        ccxt_error = None
+
+        # 尝试 CCXT
+        try:
+            return self.exchange.fetch_ticker(symbol)
+        except Exception as e:
+            ccxt_error = e
+            logger.warning(f"⚠️ CCXT 获取 {symbol} 失败: {e}，尝试免费数据源...")
+
+        # 备选：使用免费数据源
+        try:
+            source = self._get_free_data_source()
+            if source is None:
+                raise Exception("FreeDataSource 未初始化")
+
+            # 提取基础币种
+            base = symbol.split('/')[0]
+
+            # 同步获取数据
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                # 如果已有运行中的 loop，用 create_task
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as pool:
+                    future = pool.submit(asyncio.run, source.get_price_binance(base))
+                    data = future.result(timeout=10)
+            except RuntimeError:
+                # 没有运行中的 loop
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    data = loop.run_until_complete(source.get_price_binance(base))
+                finally:
+                    loop.close()
+
+            if data:
+                # 转换为 CCXT 格式
+                return {
+                    'symbol': symbol,
+                    'last': data.price_usd,
+                    'open': data.price_usd * (1 - data.change_24h_pct / 100),
+                    'high': data.price_usd * 1.01,
+                    'low': data.price_usd * 0.99,
+                    'percentage': data.change_24h_pct,
+                    'volume': data.volume_24h or 0,
+                    'quoteVolume': data.volume_24h_quote or 0,
+                    'timestamp': None,
+                    'datetime': None,
+                    'previousClose': None,
+                    'change': data.change_24h,
+                    'average': None,
+                    'ask': data.price_usd,
+                    'askVolume': None,
+                    'bid': data.price_usd,
+                    'bidVolume': None,
+                    'info': {'source': 'free_data'},
+                }
+            else:
+                raise Exception("免费数据源返回空数据")
+        except Exception as e:
+            logger.error(f"❌ 获取 {symbol} 价格失败: {e}")
+            if ccxt_error:
+                raise ccxt_error  # 抛出原始错误
+            raise
 
     def fetch_symbol_info(self, symbol: str) -> SymbolInfo:
         """
