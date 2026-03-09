@@ -67,14 +67,32 @@ SYMBOL_MAP = {
     'BTC/USDT': {'base': 'bitcoin', 'spot': 'BTCUSDT'},
     'ETH/USDT': {'base': 'ethereum', 'spot': 'ETHUSDT'},
     'SOL/USDT': {'base': 'solana', 'spot': 'SOLUSDT'},
-    'XRP/USDT': {'base': 'ripple', 'spot': 'XRPUSDT'},
     'BNB/USDT': {'base': 'binancecoin', 'spot': 'BNBUSDT'},
+    'XRP/USDT': {'base': 'ripple', 'spot': 'XRPUSDT'},
     'ADA/USDT': {'base': 'cardano', 'spot': 'ADAUSDT'},
     'DOGE/USDT': {'base': 'dogecoin', 'spot': 'DOGEUSDT'},
     'AVAX/USDT': {'base': 'avalanche-2', 'spot': 'AVAXUSDT'},
     'DOT/USDT': {'base': 'polkadot', 'spot': 'DOTUSDT'},
     'MATIC/USDT': {'base': 'matic-network', 'spot': 'MATICUSDT'},
     'LINK/USDT': {'base': 'chainlink', 'spot': 'LINKUSDT'},
+    'UNI/USDT': {'base': 'uniswap', 'spot': 'UNIUSDT'},
+    'ATOM/USDT': {'base': 'cosmos', 'spot': 'ATOMUSDT'},
+    'LTC/USDT': {'base': 'litecoin', 'spot': 'LTCUSDT'},
+    'ETC/USDT': {'base': 'ethereum-classic', 'spot': 'ETCUSDT'},
+    'XLM/USDT': {'base': 'stellar', 'spot': 'XLMUSDT'},
+    'NEAR/USDT': {'base': 'near', 'spot': 'NEARUSDT'},
+    'APT/USDT': {'base': 'aptos', 'spot': 'APTUSDT'},
+    'ARB/USDT': {'base': 'arbitrum', 'spot': 'ARBUSDT'},
+    'OP/USDT': {'base': 'optimism', 'spot': 'OPUSDT'},
+    'SUI/USDT': {'base': 'sui', 'spot': 'SUIUSDT'},
+    'TON/USDT': {'base': 'the-open-network', 'spot': 'TONUSDT'},
+    'PEPE/USDT': {'base': 'pepe', 'spot': 'PEPEUSDT'},
+    'SHIB/USDT': {'base': 'shiba-inu', 'spot': 'SHIBUSDT'},
+    'TRX/USDT': {'base': 'tron', 'spot': 'TRXUSDT'},
+    'FIL/USDT': {'base': 'filecoin', 'spot': 'FILUSDT'},
+    'HBAR/USDT': {'base': 'hedera-hashgraph', 'spot': 'HBARUSDT'},
+    'AAVE/USDT': {'base': 'aave', 'spot': 'AAVEUSDT'},
+    'MKR/USDT': {'base': 'maker', 'spot': 'MKRUSDT'},
 }
 
 
@@ -97,6 +115,72 @@ class FreeKlineFetcher:
             timeout=aiohttp.ClientTimeout(total=15),
             proxy=self.proxy
         )
+
+    def _is_cache_valid(self, key: str) -> bool:
+        if not self.use_cache or key not in self._cache:
+            return False
+        _, timestamp = self._cache[key]
+        return (datetime.now() - timestamp).total_seconds() < self._cache_duration
+
+    def _set_cache(self, key: str, df: pd.DataFrame):
+        self._cache[key] = (df, datetime.now())
+
+    def _save_to_sqlite(self, symbol: str, interval: str, df: pd.DataFrame):
+        """保存数据到 SQLite 本地缓存"""
+        if df.empty:
+            return
+        try:
+            conn = sqlite3.connect(str(DB_CACHE_PATH))
+            df_reset = df.reset_index()
+            df_reset['symbol'] = symbol
+            df_reset['interval'] = interval
+
+            # 插入或替换
+            for _, row in df_reset.iterrows():
+                conn.execute("""
+                    INSERT OR REPLACE INTO klines_cache
+                    (symbol, interval, timestamp, open, high, low, close, volume)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (symbol, interval, int(row['timestamp'].timestamp()),
+                      row['open'], row['high'], row['low'], row['close'], row['volume']))
+
+            conn.commit()
+            conn.close()
+            logger.info(f"SQLite: 保存 {len(df)} 条 {symbol} 数据")
+        except Exception as e:
+            logger.error(f"SQLite 保存失败: {e}")
+
+    def _load_from_sqlite(self, symbol: str, interval: str,
+                          days: int = 7) -> pd.DataFrame:
+        """从 SQLite 本地缓存加载数据"""
+        try:
+            conn = sqlite3.connect(str(DB_CACHE_PATH))
+            start_ts = int((datetime.now() - timedelta(days=days)).timestamp())
+
+            cursor = conn.execute("""
+                SELECT timestamp, open, high, low, close, volume
+                FROM klines_cache
+                WHERE symbol = ? AND interval = ? AND timestamp >= ?
+                ORDER BY timestamp
+            """, (symbol, interval, start_ts))
+
+            rows = cursor.fetchall()
+            conn.close()
+
+            if not rows:
+                return pd.DataFrame()
+
+            df = pd.DataFrame(rows, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+            df.set_index('timestamp', inplace=True)
+            df = df.astype(float)
+
+            logger.info(f"SQLite: 加载 {len(df)} 条 {symbol} 缓存数据")
+            return df
+
+        except Exception as e:
+            logger.error(f"SQLite 加载失败: {e}")
+            return pd.DataFrame()
 
     async def fetch_coingecko_klines(self, symbol: str, interval: str = '1h',
                                      days: int = 7) -> pd.DataFrame:
@@ -372,7 +456,7 @@ class FreeKlineFetcher:
                             'volume': float(c[5])
                         })
 
-                    df = pd.DataFrame(records[-limit:])
+                    df = pd.DataFrame(records)
                     df.set_index('timestamp', inplace=True)
 
                     self._set_cache(cache_key, df)
