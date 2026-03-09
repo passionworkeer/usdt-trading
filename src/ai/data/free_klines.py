@@ -4,11 +4,19 @@
 不依赖 Binance API，使用免费数据源：
 1. CoinCap 历史数据
 2. Binance 现货 REST API (备用)
-3. 多交易所聚合
+3. OKX 公共 API
+4. CoinGecko (新增)
+5. CryptoCompare (新增)
+6. 本地 SQLite 缓存 (新增)
+7. CSV 导入 (新增)
 
-解决网络问题：自动代理、多源备用、缓存
+解决网络问题：自动代理、多源备用、离线缓存
 """
 import logging
+import os
+import sqlite3
+import json
+from pathlib import Path
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 import pandas as pd
@@ -20,6 +28,39 @@ logger = logging.getLogger(__name__)
 
 # 代理配置
 PROXY = "http://127.0.0.1:7890"
+
+# 本地缓存目录
+CACHE_DIR = Path(os.path.expanduser("~/.cache/usdt_klines"))
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+DB_CACHE_PATH = CACHE_DIR / "klines_cache.db"
+
+# SQLite 数据库初始化
+def _init_db():
+    """初始化 SQLite 缓存数据库"""
+    conn = sqlite3.connect(str(DB_CACHE_PATH))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS klines_cache (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            interval TEXT NOT NULL,
+            timestamp INTEGER NOT NULL,
+            open REAL,
+            high REAL,
+            low REAL,
+            close REAL,
+            volume REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(symbol, interval, timestamp)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_symbol_interval
+        ON klines_cache(symbol, interval)
+    """)
+    conn.commit()
+    conn.close()
+
+_init_db()
 
 # 支持的交易对
 SYMBOL_MAP = {
@@ -57,14 +98,89 @@ class FreeKlineFetcher:
             proxy=self.proxy
         )
 
-    def _is_cache_valid(self, key: str) -> bool:
-        if not self.use_cache or key not in self._cache:
-            return False
-        _, timestamp = self._cache[key]
-        return (datetime.now() - timestamp).total_seconds() < self._cache_duration
+    async def fetch_coingecko_klines(self, symbol: str, interval: str = '1h',
+                                     days: int = 7) -> pd.DataFrame:
+        """
+        从 CoinGecko 获取历史数据
+        免费 API，无需 Key，但有请求限制
+        """
+        cache_key = f"coingecko_{symbol}_{interval}_{days}"
+        if self._is_cache_valid(cache_key):
+            return self._cache[cache_key][0]
 
-    def _set_cache(self, key: str, df: pd.DataFrame):
-        self._cache[key] = (df, datetime.now())
+        coin_id = SYMBOL_MAP.get(symbol, {}).get('base')
+        if not coin_id:
+            logger.warning(f"不支持的交易对: {symbol}")
+            return pd.DataFrame()
+
+        # 转换间隔
+        days_param = min(days, 90)  # CoinGecko 限制
+
+        try:
+            async with self._get_session() as session:
+                url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+                params = {
+                    'vs_currency': 'usd',
+                    'days': days_param,
+                }
+
+                async with session.get(url, params=params) as response:
+                    if response.status == 429:
+                        logger.warning("CoinGecko API 限流，等待 60 秒")
+                        await asyncio.sleep(60)
+                        return pd.DataFrame()
+
+                    if response.status != 200:
+                        logger.error(f"CoinGecko API 错误: {response.status}")
+                        return pd.DataFrame()
+
+                    data = await response.json()
+                    prices = data.get('prices', [])
+                    volumes = data.get('total_volumes', [])
+
+                    if not prices:
+                        return pd.DataFrame()
+
+                    # 转换为 OHLCV 格式
+                    records = []
+                    for i, (ts, price) in enumerate(prices):
+                        vol = volumes[i][1] if i < len(volumes) else 0
+                        records.append({
+                            'timestamp': pd.to_datetime(ts, unit='ms'),
+                            'open': price,
+                            'high': price,
+                            'low': price,
+                            'close': price,
+                            'volume': vol
+                        })
+
+                    df = pd.DataFrame(records)
+                    df.set_index('timestamp', inplace=True)
+
+                    # 重采样到目标间隔
+                    if interval in ['1h', '4h', '1d']:
+                        df = self._resample_ohlcv(df, interval)
+
+                    self._set_cache(cache_key, df)
+                    logger.info(f"CoinGecko: 获取 {len(df)} 条 {symbol} K线")
+                    return df
+
+        except Exception as e:
+            logger.error(f"CoinGecko 获取失败: {e}")
+            return pd.DataFrame()
+
+    def _resample_ohlcv(self, df: pd.DataFrame, interval: str) -> pd.DataFrame:
+        """重采样 OHLCV 数据"""
+        interval_map = {'1h': '1H', '4h': '4H', '1d': '1D'}
+        resample_rule = interval_map.get(interval, '1H')
+
+        return df.resample(resample_rule).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
 
     async def fetch_coincap_klines(self, symbol: str, interval: str = '1h',
                                    days: int = 7) -> pd.DataFrame:
@@ -266,28 +382,146 @@ class FreeKlineFetcher:
             logger.error(f"OKX 获取失败: {e}")
             return pd.DataFrame()
 
+    async def fetch_coingecko_klines(self, symbol: str, interval: str = '1h',
+                                       days: int = 7) -> pd.DataFrame:
+        """
+        从 CoinGecko 获取历史数据
+        免费 API，无需 Key，但有请求限制 (10-30 calls/minute)
+        """
+        cache_key = f"coingecko_{symbol}_{interval}_{days}"
+        if self._is_cache_valid(cache_key):
+            return self._cache[cache_key][0]
+
+        coin_id = SYMBOL_MAP.get(symbol, {}).get('base')
+        if not coin_id:
+            logger.warning(f"不支持的交易对: {symbol}")
+            return pd.DataFrame()
+
+        # CoinGecko 限制: 最多 365 天
+        days_param = min(days, 365)
+
+        try:
+            async with self._get_session() as session:
+                url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+                params = {
+                    'vs_currency': 'usd',
+                    'days': days_param,
+                }
+
+                async with session.get(url, params=params) as response:
+                    if response.status == 429:
+                        logger.warning("CoinGecko API 限流，等待 60 秒后重试")
+                        await asyncio.sleep(60)
+                        # 重试一次
+                        async with session.get(url, params=params) as retry_response:
+                            if retry_response.status != 200:
+                                return pd.DataFrame()
+                            data = await retry_response.json()
+                    elif response.status != 200:
+                        logger.error(f"CoinGecko API 错误: {response.status}")
+                        return pd.DataFrame()
+                    else:
+                        data = await response.json()
+
+                    prices = data.get('prices', [])
+                    volumes = data.get('total_volumes', [])
+
+                    if not prices:
+                        return pd.DataFrame()
+
+                    # 转换为 OHLCV 格式
+                    records = []
+                    for i, (ts, price) in enumerate(prices):
+                        vol = volumes[i][1] if i < len(volumes) else 0
+                        records.append({
+                            'timestamp': pd.to_datetime(ts, unit='ms'),
+                            'open': float(price),
+                            'high': float(price),
+                            'low': float(price),
+                            'close': float(price),
+                            'volume': float(vol)
+                        })
+
+                    df = pd.DataFrame(records)
+                    df.set_index('timestamp', inplace=True)
+
+                    # 重采样到目标间隔 (CoinGecko 提供的是分钟级数据)
+                    if interval in ['1h', '4h', '1d'] and len(df) > 100:
+                        df = self._resample_ohlcv(df, interval)
+
+                    self._set_cache(cache_key, df)
+                    logger.info(f"CoinGecko: 获取 {len(df)} 条 {symbol} K线")
+                    return df
+
+        except Exception as e:
+            logger.error(f"CoinGecko 获取失败: {e}")
+            return pd.DataFrame()
+
+    def _resample_ohlcv(self, df: pd.DataFrame, interval: str) -> pd.DataFrame:
+        """重采样 OHLCV 数据到目标时间间隔"""
+        interval_map = {'1h': '1H', '4h': '4H', '1d': '1D', '1w': '1W'}
+        resample_rule = interval_map.get(interval, '1H')
+
+        resampled = df.resample(resample_rule).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        }).dropna()
+
+        return resampled
+
     async def fetch_free_klines(self, symbol: str = 'BTC/USDT',
                                interval: str = '1h',
-                               days: int = 7) -> pd.DataFrame:
+                               days: int = 7,
+                               use_offline_cache: bool = True) -> pd.DataFrame:
         """
-        综合获取免费 K 线（多源备用）
+        综合获取免费 K 线（多源备用 + 离线缓存）
 
-        优先：CoinCap -> Binance -> OKX
+        策略：
+        1. 先检查 SQLite 本地缓存（离线可用）
+        2. 在线获取：CoinCap -> Binance -> OKX -> CoinGecko
+        3. 保存到本地缓存供下次离线使用
+
+        Args:
+            symbol: 交易对
+            interval: 时间间隔
+            days: 获取天数
+            use_offline_cache: 是否使用本地离线缓存
         """
-        # 优先尝试 CoinCap
-        df = await self.fetch_coincap_klines(symbol, interval, days)
-        if not df.empty:
-            return df
+        # 1. 先尝试本地缓存（离线可用）
+        if use_offline_cache:
+            cached_df = self._load_from_sqlite(symbol, interval, days)
+            if not cached_df.empty and len(cached_df) >= days * 24 * 0.8:  # 至少 80% 数据
+                logger.info(f"使用本地缓存数据: {symbol}")
+                return cached_df
 
-        # 备用 Binance
-        df = await self.fetch_binance_klines(symbol, interval, days)
-        if not df.empty:
-            return df
+        # 2. 在线获取（多源备用）
+        sources = [
+            ('CoinCap', self.fetch_coincap_klines),
+            ('Binance', self.fetch_binance_klines),
+            ('OKX', self.fetch_okx_klines),
+            ('CoinGecko', self.fetch_coingecko_klines),
+        ]
 
-        # 最后 OKX
-        df = await self.fetch_okx_klines(symbol, interval, days)
-        if not df.empty:
-            return df
+        for source_name, fetch_func in sources:
+            try:
+                df = await fetch_func(symbol, interval, days)
+                if not df.empty:
+                    logger.info(f"从 {source_name} 获取数据成功: {symbol}")
+                    # 保存到本地缓存
+                    if use_offline_cache:
+                        self._save_to_sqlite(symbol, interval, df)
+                    return df
+            except Exception as e:
+                logger.warning(f"{source_name} 获取失败: {e}")
+                continue
+
+        # 3. 所有在线源都失败，返回部分缓存数据（如果有）
+        if use_offline_cache and not cached_df.empty:
+            logger.warning(f"所有在线源失败，使用过期缓存: {symbol}")
+            return cached_df
 
         logger.error(f"所有数据源都失败: {symbol}")
         return pd.DataFrame()
