@@ -231,7 +231,6 @@ class GlobalSessionManager:
             logger.info(f"Session 使用代理: {PROXY}")
 
         self.session = aiohttp.ClientSession(**session_kwargs)
-        )
 
         self.initialized = True
 
