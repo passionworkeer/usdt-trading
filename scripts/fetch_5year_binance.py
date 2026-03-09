@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-async def fetch_with_binance分段(fetcher: FreeKlineFetcher, symbol: str, interval: str = '1d', years: int = 5):
+async def fetch_with_binance分段(fetcher: FreeKlineFetcher, symbol: str, interval: str = '1d', years: int = 10):
     """
     分段从 Binance 获取多年数据
 
@@ -42,6 +42,7 @@ async def fetch_with_binance分段(fetcher: FreeKlineFetcher, symbol: str, inter
         # 直接调用 Binance API 获取更多数据
         # 注意：这里我们需要绕过 fetcher 的限制
         import aiohttp
+        import pandas as pd
 
         spot = SYMBOL_MAP.get(symbol, {}).get('spot', symbol.replace('/', ''))
 
@@ -52,8 +53,8 @@ async def fetch_with_binance分段(fetcher: FreeKlineFetcher, symbol: str, inter
             all_records = []
             now = datetime.now()
 
-            # 分 5 段获取（每段 365 天）
-            for i in range(5):
+            # 分 10 段获取（每段 400 天，10*400 = 4000天 ≈ 10年）
+            for i in range(10):
                 end_time = now - timedelta(days=i * 365)
                 start_time = end_time - timedelta(days=400)  # 多取一点确保重叠
 
@@ -112,7 +113,7 @@ async def fetch_with_binance分段(fetcher: FreeKlineFetcher, symbol: str, inter
 
 async def main():
     print("=" * 60)
-    print("尝试获取 5 年历史数据 (Binance)")
+    print("尝试获取 10 年历史数据 (Binance)")
     print("=" * 60)
 
     fetcher = FreeKlineFetcher(use_cache=True)
@@ -121,7 +122,7 @@ async def main():
     symbols = list(SYMBOL_MAP.keys())[:15]  # 15 个主流币种
 
     for symbol in symbols:
-        await fetch_with_binance分段(fetcher, symbol, '1d', years=5)
+        await fetch_with_binance分段(fetcher, symbol, '1d', years=10)
         await asyncio.sleep(0.5)
 
     # 统计
