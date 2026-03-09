@@ -123,6 +123,14 @@ from .smart_money import (
     create_institutional_detector,
 )
 
+# 免费 K 线
+from .free_klines import (
+    FreeKlineFetcher,
+    fetch_free_klines,
+    fetch_klines_sync,
+    get_free_kline_fetcher,
+)
+
 __all__ = [
     # 原有模块
     'MarketDataCollector',
@@ -216,4 +224,9 @@ __all__ = [
     'create_order_book_analyzer',
     'create_arbitrage_detector',
     'create_institutional_detector',
+    # 免费 K 线
+    'FreeKlineFetcher',
+    'fetch_free_klines',
+    'fetch_klines_sync',
+    'get_free_kline_fetcher',
 ]
