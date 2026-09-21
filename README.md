@@ -45,6 +45,8 @@ cp .env.example .env
 
 ### 3. 启动交易系统
 
+交易日志、仓位状态、AI 市场报告及本地助手配置保存在本机，并已加入 `.gitignore`。运行时由脚本生成这些文件；仓库中的 `data/historical_klines/` 与 `scripts/trading_dashboard/data/` 保留市场 K 线数据。
+
 ```bash
 # 启动核心交易进程
 python scripts/sniper_trader.py

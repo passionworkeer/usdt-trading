@@ -68,3 +68,15 @@ scripts/paper_trading_state.json
 scripts/paper_trading.log
 scripts/run_backtest_btc_sol.py
 scripts/trading_record_btc_sol_1h.md
+
+# 本地助手配置和运行记录
+.claude/settings.json
+.claude/settings.local.json
+test_results.txt
+TRADING_LOG*.md
+trix_trades.md
+sim_trades.md
+sim_state.json
+ai_memory/
+scripts/market_report.md
+scripts/trading_record*.md
