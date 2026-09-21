@@ -1,23 +1,25 @@
 # Sniper Trading System - 狙击手交易系统
 
+> **归档日期：2026-09-21。** 本项目停止主动维护，作为加密货币交易策略与系统工程实验公开保留。代码、依赖和交易所接口未持续验证；历史策略与性能描述不构成收益保证或实盘可用性承诺。第三方代码与数据继续遵循其原有许可与使用条件。
+
 **版本**: v8.0 AI Agent 双轨架构
-**最后更新**: 2026-02-25
+**历史版本说明日期**: 2026-02-25
 
 ---
 
 ## 项目概述
 
-这是一套军工级的超低频、极高置信度加密货币交易系统，专为 200 USDT 超小资金设计。
+这是一个加密货币交易系统工程原型，用于探索多周期信号、AI 辅助决策、订单执行与监控。以下架构和参数保留历史设计记录，本次归档未重新验证其交易行为、性能或收益。
 
 ### 核心特性
 
 | 特性 | 说明 |
 |------|------|
 | 🤖 **AI Agent 双轨架构** | 宏观大局观（每小时）+ 微观审批（3-5秒） |
-| 🎯 **狙击手模式** | 一周 1-2 次开仓，MTF 三重共振确认 |
-| ⚡ **超低延迟** | 进程级隔离，<50ms 交易延迟 |
+| 🎯 **狙击手模式** | MTF 三重共振确认；一周 1-2 次开仓为历史设计目标 |
+| ⚡ **进程隔离** | 历史目标为 <50ms 交易延迟，归档时未重新实测 |
 | 🔒 **滑点硬拦截** | AI 思考期间价格变动 >0.5% 自动撤销 |
-| 🧪 **Dry-Run** | 完整模拟模式，零风险测试 |
+| 🧪 **Dry-Run** | 模拟执行配置，复用前需自行核查执行路径与外部调用 |
 | 📡 **异步预警** | Telegram/Discord 实时通知 |
 
 ---
@@ -56,34 +58,16 @@ python scripts/sniper_trader.py
 
 ## 文档导航
 
-### 📖 核心文档
-
-| 文档 | 说明 |
+| 入口 | 说明 |
 |------|------|
-| [USAGE.md](docs/USAGE.md) | 完整使用指南 |
-| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 系统架构详解 |
-| [CONFIGURATION.md](docs/CONFIGURATION.md) | 配置参数详解 |
-| [VERSION_v8.0.md](docs/VERSION_v8.0.md) | v8.0 版本说明 |
+| [.env.example](.env.example) | 环境变量模板 |
+| [config/trading_config.yaml](config/trading_config.yaml) | 交易配置 |
+| [src/ai/data/free_klines_guide.md](src/ai/data/free_klines_guide.md) | K 线数据获取说明 |
+| [src/](src/) | 策略、AI 决策、订单执行与监控源码 |
+| [scripts/](scripts/) | 数据下载、交易与监控脚本 |
+| [data/historical_klines/](data/historical_klines/) | 历史市场 K 线数据 |
 
-### 🏗️ 架构文档
-
-| 文档 | 说明 |
-|------|------|
-| [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) | 系统架构总览 |
-| [docs/LATENCY_BUDGET.md](docs/LATENCY_BUDGET.md) | 延迟预算设计 |
-
-### 🔧 运维文档
-
-| 文档 | 说明 |
-|------|------|
-| [docs/MONITORING_GUIDE.md](docs/MONITORING_GUIDE.md) | 监控面板使用 |
-| [docs/ENHANCED_GUIDE.md](docs/ENHANCED_GUIDE.md) | 高级使用指南 |
-
-### 📦 归档文档
-
-| 文档 | 说明 |
-|------|------|
-| [docs/archive/](docs/archive/) | 历史版本文档归档 |
+当前仓库未包含独立的 `docs/` 和 `tests/` 目录。保留的测试启动脚本不代表当前归档具备完整测试集。
 
 ---
 
@@ -164,7 +148,7 @@ sniper-trading-system/
 │   │   └── mtf_resonance_lock.py       # MTF 三重共振锁
 │   ├── monitoring/               # 监控模块
 │   │   ├── state_broadcaster.py        # Redis 状态广播
-│   │   └── monitoring_daemon.py        # 独立监控守护进程
+│   │   └── monitoring_server.py        # 监控服务
 │   ├── execution/                # 执行层
 │   │   └── slippage_hardlock.py        # 滑点硬拦截器
 │   └── utils/                    # 工具函数
@@ -175,13 +159,9 @@ sniper-trading-system/
 │   ├── monitoring_daemon.py      # 监控守护进程
 │   └── start_monitoring.py       # 监控启动脚本
 │
-├── tests/                        # 测试文件
-├── docs/                         # 文档
-│   ├── archive/                  # 历史文档归档
-│   └── ...
-│
-├── logs/                         # 日志目录
-├── .env                          # 环境变量配置
+├── data/historical_klines/        # 已保留的市场数据
+├── logs/                         # 本地运行生成，不纳入 Git
+├── .env                          # 本地配置，不纳入 Git
 ├── .env.example                  # 环境变量模板
 └── requirements.txt              # Python 依赖
 ```
@@ -224,18 +204,16 @@ MTF 三重共振触发
 
 ## 安全警告
 
-⚠️ **生产环境必须遵守**：
+**复用历史代码前需独立验证，以下配置不能替代安全与交易行为检查：**
 
 1. **API Key 保护**：
    - 启用 IP 白名单
    - 只交易权限（禁止提现）
    - 定期轮换密钥
 
-2. **从小金额开始**：先用 < 10 USDT 测试
+2. **隔离验证**：先检查下单路径、测试网配置和外部调用。
 
-3. **测试网验证**：主网前必须通过测试网验证
-
-4. **Dry-Run 模式**：首次运行务必使用 `DRY_RUN=true`
+3. **Dry-Run 模式**：首次运行使用 `DRY_RUN=true`，并核对该配置是否被实际执行路径读取。
 
 ---
 
@@ -245,8 +223,6 @@ MIT License
 
 ---
 
-## 联系方式
+## 维护状态
 
-- 项目维护：Sniper Trading Team
-- 架构审查：CTO Office
-- 安全审查：Security Team
+仓库作为个人历史工程实验归档，不再提供主动维护或实盘支持。需要继续开发时，可 fork 后自行验证与更新。
